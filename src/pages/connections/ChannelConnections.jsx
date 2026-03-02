@@ -1,8 +1,7 @@
 // src/pages/connections/ChannelConnections.jsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams, useNavigate } from "react-router-dom";
+import React, { useEffect, useMemo, useState } from "react";
 import AppShell from "../../components/AppShell.jsx";
-import { buildMetaAuthUrl, parseState } from "../../lib/metaConnect";
+import { buildMetaAuthUrl } from "../../lib/metaConnect";
 
 const DUMMY_LOGS = [
   {
@@ -90,15 +89,13 @@ function labelFromStatus(status) {
 }
 
 export default function ChannelConnections({ theme, setTheme }) {
-  const nav = useNavigate();
-  const [searchParams] = useSearchParams();
-  const handledCodeRef = useRef(new Set());
-
   const API_BASE = import.meta.env.VITE_API_BASE;
 
   const [q, setQ] = useState("");
+
   const [workspaces, setWorkspaces] = useState([]);
   const [wsLoading, setWsLoading] = useState(true);
+
   const [workspaceId, setWorkspaceId] = useState(
     localStorage.getItem("active_workspace_id") || ""
   );
@@ -200,70 +197,57 @@ export default function ChannelConnections({ theme, setTheme }) {
       alert("Select a workspace first.");
       return;
     }
-    window.location.href = buildMetaAuthUrl({ workspaceId });
+    window.location.assign(buildMetaAuthUrl({ workspaceId }));
   }
 
-  // ✅ SINGLE effect for callback exchange (NO duplicates)
+  // ✅ OPTION A: Open picker from MetaCallback result stored in localStorage
+  // IMPORTANT: MetaCallback MUST store:
+  // localStorage.setItem("meta_exchange_result", JSON.stringify({ ...exchangeResponse, workspaceId }))
   useEffect(() => {
-    const code = searchParams.get("code");
-    const stateRaw = searchParams.get("state");
-    if (!code || !stateRaw) return;
+    try {
+      const raw = localStorage.getItem("meta_exchange_result");
+      if (!raw) return;
 
-    if (handledCodeRef.current.has(code)) return;
-    handledCodeRef.current.add(code);
+      // remove FIRST to avoid re-open loops on errors/refresh
+      localStorage.removeItem("meta_exchange_result");
 
-    const st = parseState(stateRaw);
-    const stWsId = st?.workspaceId;
+      const j = JSON.parse(raw || "{}");
+      const stWsId = String(j?.workspaceId || "");
 
-    if (!stWsId) {
-      nav("/connections", { replace: true });
-      return;
-    }
-
-    if (stWsId !== workspaceId) {
-      setWorkspaceId(stWsId);
-      localStorage.setItem("active_workspace_id", stWsId);
-    }
-
-    (async () => {
-      try {
-        setPickerBusy(true);
-        setErr("");
-
-        const j = await apiFetch("/api/meta/exchange", {
-          method: "POST",
-          body: JSON.stringify({ code, workspaceId: stWsId }),
-        });
-
-        setPages(j?.pages || []);
-        setUserToken(j?.user_access_token || "");
-        setExpiresIn(j?.expires_in ?? null);
-
-        // ✅ default selections:
-        // - FB always checked
-        // - IG checked IF igId exists
-        const next = {};
-        for (const p of j?.pages || []) {
-          next[p.pageId] = {
-            connectFacebook: true,
-            connectInstagram: !!p.igId, // ✅ auto ON if available
-          };
-        }
-        setSelections(next);
-
-        setPickerOpen(true);
-
-        // clean URL
-        nav("/connections", { replace: true });
-      } catch (e) {
-        setErr(String(e?.message || e));
-      } finally {
-        setPickerBusy(false);
+      if (!stWsId) {
+        setErr("Meta connect failed: missing workspaceId in exchange result.");
+        return;
       }
-    })();
 
+      // force workspace to callback workspace
+      if (stWsId !== workspaceId) {
+        setWorkspaceId(stWsId);
+        localStorage.setItem("active_workspace_id", stWsId);
+      }
+
+      const returnedPages = Array.isArray(j?.pages) ? j.pages : [];
+      setPages(returnedPages);
+      setUserToken(j?.user_access_token || "");
+      setExpiresIn(j?.expires_in ?? null);
+
+      // default selections
+      const next = {};
+      for (const p of returnedPages) {
+        next[p.pageId] = {
+          connectFacebook: true,
+          connectInstagram: !!p.igId,
+        };
+      }
+      setSelections(next);
+
+      // open modal after state updates flush
+      setTimeout(() => setPickerOpen(true), 0);
+    } catch (e) {
+      console.error("Failed to read meta_exchange_result:", e);
+      setErr("Meta connect failed: could not parse exchange result.");
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams, nav, workspaceId]);
+  }, []);
 
   function toggle(pageId, key) {
     setSelections((prev) => ({
@@ -392,9 +376,7 @@ export default function ChannelConnections({ theme, setTheme }) {
                 onChange={(e) => setWorkspaceId(e.target.value)}
                 className="w-full rounded-xl bg-white/5 border border-white/10 px-3 py-3 text-sm text-white outline-none focus:border-primary/40"
               >
-                <option value="">
-                  {wsLoading ? "Loading workspaces..." : "Select workspace..."}
-                </option>
+                <option value="">{wsLoading ? "Loading workspaces..." : "Select workspace..."}</option>
                 {(workspaces || []).map((w) => (
                   <option key={w.id} value={w.id}>
                     {w.name}
@@ -437,9 +419,7 @@ export default function ChannelConnections({ theme, setTheme }) {
           ) : !workspaceId ? (
             <div className="glass-panel border border-white/10 rounded-2xl p-8 text-center">
               <p className="text-white font-bold">Select a workspace to view/manage connections</p>
-              <p className="text-white/50 text-sm mt-2">
-                Meta connections are saved under a workspace.
-              </p>
+              <p className="text-white/50 text-sm mt-2">Meta connections are saved under a workspace.</p>
             </div>
           ) : filteredChannels.length === 0 ? (
             <div className="glass-panel border border-white/10 rounded-2xl p-8 text-center">
@@ -489,11 +469,7 @@ export default function ChannelConnections({ theme, setTheme }) {
                   <div className="flex-1 grid grid-cols-1 lg:grid-cols-4 gap-6">
                     <div className="lg:col-span-1">
                       <h3 className="text-xl font-bold text-white">
-                        {c.platform === "facebook"
-                          ? "Facebook"
-                          : c.platform === "instagram"
-                          ? "Instagram"
-                          : "Channel"}
+                        {c.platform === "facebook" ? "Facebook" : c.platform === "instagram" ? "Instagram" : "Channel"}
                       </h3>
                       <StatusBadge tone={tone} label={labelFromStatus(c.status)} />
                     </div>
@@ -564,18 +540,10 @@ export default function ChannelConnections({ theme, setTheme }) {
               <table className="w-full text-left border-collapse">
                 <thead>
                   <tr className="bg-primary/5 border-b border-primary/10">
-                    <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-slate-500">
-                      Channel
-                    </th>
-                    <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-slate-500">
-                      Event
-                    </th>
-                    <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-slate-500">
-                      Timestamp
-                    </th>
-                    <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-slate-500 text-right">
-                      Status
-                    </th>
+                    <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-slate-500">Channel</th>
+                    <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-slate-500">Event</th>
+                    <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-slate-500">Timestamp</th>
+                    <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-slate-500 text-right">Status</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-primary/5">
