@@ -26,6 +26,19 @@ export default function MetaCallback() {
 
   useEffect(() => {
     const run = async () => {
+      // Meta can send error params too
+      const error = params.get("error");
+      const errorReason = params.get("error_reason");
+      const errorDescription = params.get("error_description");
+
+      if (error || errorDescription) {
+        const msg = errorDescription || errorReason || error || "Meta login failed";
+        console.error("Meta OAuth error:", { error, errorReason, errorDescription });
+        setStatus(msg);
+        setTimeout(() => nav("/connections", { replace: true }), 400);
+        return;
+      }
+
       const code = params.get("code");
       const stateRaw = params.get("state");
 
@@ -35,7 +48,7 @@ export default function MetaCallback() {
         return;
       }
 
-      // must be logged in
+      // must be logged in (your app)
       const access = getAccessToken();
       if (!access) {
         nav("/login", { replace: true });
@@ -46,8 +59,9 @@ export default function MetaCallback() {
       const st = parseState(stateRaw);
       const workspaceId = String(st?.workspaceId || "");
       if (!workspaceId) {
+        console.error("MetaCallback invalid stateRaw:", stateRaw);
         setStatus("Invalid state (missing workspaceId).");
-        nav("/connections", { replace: true });
+        setTimeout(() => nav("/connections", { replace: true }), 400);
         return;
       }
 
@@ -67,17 +81,21 @@ export default function MetaCallback() {
 
         if (!r.ok) {
           console.error("Meta exchange failed:", j);
-          const msg = j?.message || j?.error || "Meta exchange failed";
+          const msg = j?.message || j?.error || `Meta exchange failed (${r.status})`;
           setStatus(msg);
-          // go back to connections (no query params)
-          setTimeout(() => nav("/connections", { replace: true }), 300);
+
+          // Clear any stale payload so Connections doesn't try opening old data
+          localStorage.removeItem("meta_exchange_result");
+
+          setTimeout(() => nav("/connections", { replace: true }), 500);
           return;
         }
 
-        // ✅ ensure workspaceId is present for ChannelConnections Option A
+        // ✅ CRITICAL: include workspaceId for Option A modal logic
+        // ChannelConnections reads this and forces correct workspace selection + opens picker
         const payload = { ...j, workspaceId };
 
-        // ✅ store for ChannelConnections to open modal
+        // Replace to avoid mixing old results
         localStorage.setItem("meta_exchange_result", JSON.stringify(payload));
 
         setStatus("Redirecting…");
@@ -85,7 +103,8 @@ export default function MetaCallback() {
       } catch (e) {
         console.error(e);
         setStatus("Network error while connecting Meta");
-        setTimeout(() => nav("/connections", { replace: true }), 300);
+        localStorage.removeItem("meta_exchange_result");
+        setTimeout(() => nav("/connections", { replace: true }), 500);
       }
     };
 
