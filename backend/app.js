@@ -1964,16 +1964,5 @@ app.use((err, req, res, next) => {
 });
 
 /* ---------------- Start ---------------- */
-async function boot() {
-  await ensureDevUsers();
-  app.listen(PORT, () => {
-    console.log(`Backend running: http://localhost:${PORT}`);
-    console.log(`Health: http://localhost:${PORT}/api/health`);
-    console.log(`Meta webhook verify URL: http://localhost:${PORT}/api/meta/webhook`);
-    console.log(`Meta webhook alias URL: http://localhost:${PORT}/api/webhooks/meta`);
-  });
-}
-boot().catch((e) => {
-  console.error("Boot failed:", e);
-  process.exit(1);
-});
+export default app;
+export { ensureDevUsers };
