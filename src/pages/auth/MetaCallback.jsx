@@ -1,3 +1,4 @@
+// src/pages/auth/MetaCallback.jsx
 import React, { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
@@ -8,8 +9,7 @@ function getAccessToken() {
 }
 
 function parseState(stateRaw) {
-  // your state looks like JSON: {"workspaceId":"...","t":...,"nonce":"..."}
-  // sometimes people base64 it; we support both
+  // supports JSON and base64(JSON)
   try {
     return JSON.parse(stateRaw);
   } catch {}
@@ -29,28 +29,25 @@ export default function MetaCallback() {
       const code = params.get("code");
       const stateRaw = params.get("state");
 
+      // must have code+state
       if (!code || !stateRaw) {
         nav("/connections", { replace: true });
         return;
       }
 
-      const st = parseState(stateRaw);
-      const workspaceId = st?.workspaceId;
-
-      if (!workspaceId) {
-        // fallback: still allow connections page to handle it
-        nav(
-          `/connections?code=${encodeURIComponent(code)}&state=${encodeURIComponent(
-            stateRaw
-          )}`,
-          { replace: true }
-        );
-        return;
-      }
-
+      // must be logged in
       const access = getAccessToken();
       if (!access) {
         nav("/login", { replace: true });
+        return;
+      }
+
+      // must include workspaceId in state
+      const st = parseState(stateRaw);
+      const workspaceId = String(st?.workspaceId || "");
+      if (!workspaceId) {
+        setStatus("Invalid state (missing workspaceId).");
+        nav("/connections", { replace: true });
         return;
       }
 
@@ -67,28 +64,28 @@ export default function MetaCallback() {
         });
 
         const j = await r.json().catch(() => ({}));
+
         if (!r.ok) {
           console.error("Meta exchange failed:", j);
-          setStatus(j?.message || j?.error || "Meta exchange failed");
-          // send to connections screen with params so user can retry
-          nav(
-            `/workspaces/${workspaceId}/connections?code=${encodeURIComponent(
-              code
-            )}&state=${encodeURIComponent(stateRaw)}`,
-            { replace: true }
-          );
+          const msg = j?.message || j?.error || "Meta exchange failed";
+          setStatus(msg);
+          // go back to connections (no query params)
+          setTimeout(() => nav("/connections", { replace: true }), 300);
           return;
         }
 
-        // store result for Connections screen to show pages list
-        localStorage.setItem("meta_exchange_result", JSON.stringify(j));
+        // ✅ ensure workspaceId is present for ChannelConnections Option A
+        const payload = { ...j, workspaceId };
+
+        // ✅ store for ChannelConnections to open modal
+        localStorage.setItem("meta_exchange_result", JSON.stringify(payload));
 
         setStatus("Redirecting…");
-        nav(`/workspaces/${workspaceId}/connections`, { replace: true });
+        nav("/connections", { replace: true });
       } catch (e) {
         console.error(e);
         setStatus("Network error while connecting Meta");
-        nav("/connections", { replace: true });
+        setTimeout(() => nav("/connections", { replace: true }), 300);
       }
     };
 
