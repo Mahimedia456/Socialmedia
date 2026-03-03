@@ -122,15 +122,11 @@ function signRealtimeJwt({ userId, workspaceId }) {
     {
       sub: String(userId),
       role: "authenticated",
+      aud: "authenticated",
       workspace_id: String(workspaceId),
     },
     SUPABASE_JWT_SECRET,
-    {
-      algorithm: "HS256",
-      expiresIn: "60m",
-      audience: "authenticated",
-      issuer: "supabase",
-    }
+    { algorithm: "HS256", expiresIn: "60m" }
   );
 }
 
@@ -408,11 +404,8 @@ async function fetchMetaPages({ userAccessToken }) {
         "id",
         "name",
         "access_token",
-        // IG Business
         "instagram_business_account{id,username}",
-        // Sometimes IG is exposed here instead
         "connected_instagram_account{id,username}",
-        // Useful to debug why a page is missing
         "tasks",
       ].join(",")
     );
@@ -436,20 +429,27 @@ async function fetchMetaPages({ userAccessToken }) {
     if (!nextAfter) break;
     after = nextAfter;
 
-    if (out.length >= 1000) break; // safety
+    if (out.length >= 1000) break;
   }
 
   return out;
 }
 
 /* --------- FB Messenger pagination --------- */
-async function fetchPageConversations({ pageId, pageToken, limit = 50, after = null }) {
+async function fetchPageConversations({
+  pageId,
+  pageToken,
+  limit = 50,
+  after = null,
+  platform = null,
+}) {
   const url = new URL(
     `https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/conversations`
   );
   url.searchParams.set("fields", "id,updated_time,snippet,participants");
   url.searchParams.set("limit", String(limit));
   if (after) url.searchParams.set("after", after);
+  if (platform) url.searchParams.set("platform", platform);
   url.searchParams.set("access_token", pageToken);
 
   const r = await fetch(url.toString());
@@ -465,7 +465,12 @@ async function fetchPageConversations({ pageId, pageToken, limit = 50, after = n
   return { data: j?.data || [], paging: j?.paging || null };
 }
 
-async function fetchConversationMessages({ conversationId, pageToken, limit = 50, after = null }) {
+async function fetchConversationMessages({
+  conversationId,
+  pageToken,
+  limit = 50,
+  after = null,
+}) {
   const url = new URL(
     `https://graph.facebook.com/${META_GRAPH_VERSION}/${conversationId}/messages`
   );
@@ -487,7 +492,12 @@ async function fetchConversationMessages({ conversationId, pageToken, limit = 50
   return { data: j?.data || [], paging: j?.paging || null };
 }
 
-async function fetchAllPageConversations({ pageId, pageToken, maxConvos = 500 }) {
+async function fetchAllPageConversations({
+  pageId,
+  pageToken,
+  maxConvos = 500,
+  platform = null,
+}) {
   const all = [];
   let after = null;
 
@@ -497,6 +507,7 @@ async function fetchAllPageConversations({ pageId, pageToken, maxConvos = 500 })
       pageToken,
       limit: 50,
       after,
+      platform,
     });
 
     all.push(...(data || []));
@@ -511,7 +522,11 @@ async function fetchAllPageConversations({ pageId, pageToken, maxConvos = 500 })
   return all;
 }
 
-async function fetchAllConversationMessages({ conversationId, pageToken, maxMsgs = 500 }) {
+async function fetchAllConversationMessages({
+  conversationId,
+  pageToken,
+  maxMsgs = 500,
+}) {
   const all = [];
   let after = null;
 
@@ -848,12 +863,12 @@ app.get("/api/health", (req, res) =>
 );
 
 /* ============================================================
-   META WEBHOOK (UPDATED)
+   META WEBHOOK (FIXED)
    - GET: verification
-   - POST: receive messages and upsert into inbox tables
+   - POST: receive events, upsert inbox
    Works on:
      /api/meta/webhook        (recommended)
-     /api/webhooks/meta       (alias - your current .env)
+     /api/webhooks/meta       (alias)
    ============================================================ */
 
 function handleMetaWebhookGet(req, res) {
@@ -916,6 +931,12 @@ async function handleMetaWebhookPost(req, res) {
         externalId: entryId,
       });
 
+      // Log changes for debugging (some events arrive as entry.changes)
+      const changes = Array.isArray(entry?.changes) ? entry.changes : [];
+      if (changes.length) {
+        console.log("META WEBHOOK entry.changes:", JSON.stringify(changes, null, 2));
+      }
+
       if (!channel) {
         ignored += 1;
         continue;
@@ -977,7 +998,7 @@ async function handleMetaWebhookPost(req, res) {
     return res.status(200).json({ ok: true, processed, ignored, errors });
   } catch (e) {
     console.error("META WEBHOOK ERROR:", e?.message || e);
-    // Still return 200 for Meta to avoid retries storm
+    // Return 200 to avoid Meta retries storm
     return res.status(200).json({ ok: false, error: "WEBHOOK_HANDLER_FAILED" });
   }
 }
@@ -1248,7 +1269,10 @@ app.post("/api/meta/exchange", requireAuth, async (req, res, next) => {
     const code = String(req.body?.code || "");
     const workspaceId = String(req.body?.workspaceId || "");
     if (!code || !workspaceId) {
-      return res.status(400).json({ error: "VALIDATION_ERROR", message: "code and workspaceId required" });
+      return res.status(400).json({
+        error: "VALIDATION_ERROR",
+        message: "code and workspaceId required",
+      });
     }
 
     if (!isGlobalAdmin(req.auth.role)) {
@@ -1260,21 +1284,18 @@ app.post("/api/meta/exchange", requireAuth, async (req, res, next) => {
     const userAccessToken = token.access_token;
     const pages = await fetchMetaPages({ userAccessToken });
 
-const normalized = (pages || []).map((p) => {
-  const ig =
-    p.instagram_business_account ||
-    p.connected_instagram_account ||
-    null;
+    const normalized = (pages || []).map((p) => {
+      const ig = p.instagram_business_account || p.connected_instagram_account || null;
 
-  return {
-    pageId: String(p.id),
-    pageName: String(p.name || "Facebook Page"),
-    pageToken: String(p.access_token || ""),
-    igId: ig?.id ? String(ig.id) : null,
-    igUsername: ig?.username ? String(ig.username) : null,
-    tasks: Array.isArray(p.tasks) ? p.tasks : [],
-  };
-});
+      return {
+        pageId: String(p.id),
+        pageName: String(p.name || "Facebook Page"),
+        pageToken: String(p.access_token || ""),
+        igId: ig?.id ? String(ig.id) : null,
+        igUsername: ig?.username ? String(ig.username) : null,
+        tasks: Array.isArray(p.tasks) ? p.tasks : [],
+      };
+    });
 
     return res.json({
       ok: true,
@@ -1397,7 +1418,10 @@ app.post("/api/meta/connect-pages", requireAuth, async (req, res, next) => {
     }
 
     if (!channelRows.length) {
-      return res.status(400).json({ error: "VALIDATION_ERROR", message: "No selections to connect" });
+      return res.status(400).json({
+        error: "VALIDATION_ERROR",
+        message: "No selections to connect",
+      });
     }
 
     const { error: chErr } = await supabase.from(T_CHANNELS).upsert(channelRows, {
@@ -1547,7 +1571,8 @@ app.post("/api/inbox/threads/:threadId/messages", requireAuth, async (req, res, 
   try {
     const { threadId } = req.params;
     const text = String(req.body?.text || "").trim();
-    if (!text) return res.status(400).json({ error: "VALIDATION_ERROR", message: "text required" });
+    if (!text)
+      return res.status(400).json({ error: "VALIDATION_ERROR", message: "text required" });
 
     const { data: thread, error: thErr } = await supabase
       .from(T_INBOX_THREADS)
@@ -1773,7 +1798,9 @@ app.post(
             const fromName = m?.from?.name ? String(m.from.name) : null;
             const text = String(m.message || "").trim();
 
-            const direction = "inbound";
+            // If fromId === pageId => outbound (sent by page), else inbound
+            const direction =
+              fromId && String(fromId) === String(pageId) ? "outbound" : "inbound";
 
             const { error: msgUpErr } = await supabase
               .from(T_INBOX_MESSAGES)
@@ -1831,22 +1858,38 @@ app.post(
 
         let convos = [];
         try {
-          convos = await fetchAllIgConversations({ igUserId, token: igToken, maxConvos: 200 });
-        } catch (e) {
-          const code = e?.meta?.code || e?.meta?.error?.code || null;
-          console.warn("IG CONVO FETCH FAILED:", e?.message, e?.meta || "");
-
-          igErrors.push({
+          // primary attempt (works only if IG messaging capability exists)
+          convos = await fetchAllIgConversations({
             igUserId,
-            message: e?.message || "IG conversations fetch failed",
-            meta: e?.meta || null,
-            hint:
-              Number(code) === 3
-                ? "Meta app lacks Instagram Messaging capability (needs product setup + app review/permissions)."
-                : "Check token scopes + app mode + IG professional account + permissions.",
+            token: igToken,
+            maxConvos: 200,
           });
-
-          continue;
+        } catch (e1) {
+          // ✅ fallback attempt: fetch via page conversations (platform=instagram)
+          try {
+            const pageId = String(igCh?.meta?.page_id || "");
+            if (!pageId) throw new Error("IG channel meta.page_id missing (needed for fallback)");
+            convos = await fetchAllPageConversations({
+              pageId,
+              pageToken: igToken,
+              maxConvos: 200,
+              platform: "instagram",
+            });
+          } catch (e2) {
+            const code = e1?.meta?.code || e1?.meta?.error?.code || null;
+            console.warn("IG CONVO FETCH FAILED (both):", e1?.message, e1?.meta || "");
+            igErrors.push({
+              igUserId,
+              message: e1?.message || "IG conversations fetch failed",
+              meta: e1?.meta || null,
+              hint:
+                Number(code) === 3
+                  ? "Meta app lacks Instagram Messaging capability (needs product setup + app review/permissions)."
+                  : "Check token scopes + app mode + IG professional account + permissions.",
+              fallback_error: { message: e2?.message || "Fallback failed" },
+            });
+            continue;
+          }
         }
 
         for (const c of convos || []) {
@@ -1921,7 +1964,9 @@ app.post(
               m?.from?.username || m?.from?.name ? String(m.from.username || m.from.name) : null;
             const text = String(m.message || "").trim();
 
-            const direction = "inbound";
+            // ✅ FIX: pageId is not defined in IG loop; use igUserId to detect outbound
+            const direction =
+              fromId && String(fromId) === String(igUserId) ? "outbound" : "inbound";
 
             const { error: msgUpErr } = await supabase
               .from(T_INBOX_MESSAGES)

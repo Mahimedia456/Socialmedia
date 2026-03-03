@@ -63,6 +63,34 @@ function removeById(list, id) {
   return list.filter((x) => x.id !== id);
 }
 
+// Prefer stable numeric sort
+function tsNum(v) {
+  const t = v ? new Date(v).getTime() : 0;
+  return Number.isFinite(t) ? t : 0;
+}
+
+function sortThreadsByLastMessageDesc(rows) {
+  return (rows || [])
+    .slice()
+    .sort((a, b) => tsNum(b.last_message_at) - tsNum(a.last_message_at));
+}
+
+function sortMessagesBySentAsc(rows) {
+  return (rows || [])
+    .slice()
+    .sort((a, b) => tsNum(a.sent_at) - tsNum(b.sent_at));
+}
+
+function makeMsgKey(m) {
+  // helps dedupe optimistic + realtime duplicates
+  // prefer external_message_id if present; else fallback to id; else (sent_at+text+direction)
+  const ext = m?.external_message_id ? String(m.external_message_id) : "";
+  const id = m?.id ? String(m.id) : "";
+  if (ext) return `ext:${ext}`;
+  if (id) return `id:${id}`;
+  return `f:${String(m?.direction || "")}:${String(m?.sent_at || "")}:${String(m?.text || "")}`;
+}
+
 export default function Inbox({ theme, setTheme }) {
   const API_BASE = import.meta.env.VITE_API_BASE;
 
@@ -89,6 +117,11 @@ export default function Inbox({ theme, setTheme }) {
   const [status, setStatus] = useState("all");
   const [q, setQ] = useState("");
 
+  // ✅ NEW: channel filter
+  const [channels, setChannels] = useState([]);
+  const [channelId, setChannelId] = useState("all");
+  const [chLoading, setChLoading] = useState(false);
+
   const [threads, setThreads] = useState([]);
   const [threadsLoading, setThreadsLoading] = useState(false);
   const [threadsErr, setThreadsErr] = useState("");
@@ -107,6 +140,9 @@ export default function Inbox({ theme, setTheme }) {
   const [rtErr, setRtErr] = useState("");
 
   const endRef = useRef(null);
+
+  // ✅ realtime auth state
+  const rtAuthRef = useRef({ workspaceId: "", token: "" });
 
   function getAccessToken() {
     return localStorage.getItem("access_token") || "";
@@ -147,10 +183,14 @@ export default function Inbox({ theme, setTheme }) {
     if (wsId) localStorage.setItem("active_workspace_id", wsId);
     else localStorage.removeItem("active_workspace_id");
 
+    // reset state
     setThreads([]);
     setActiveThreadId("");
     setMessages([]);
     setReply("");
+
+    // reset filters
+    setChannelId("all");
   }
 
   async function loadWorkspaces() {
@@ -167,6 +207,21 @@ export default function Inbox({ theme, setTheme }) {
     }
   }
 
+  async function loadChannels() {
+    if (!workspaceId) return;
+    setChLoading(true);
+    try {
+      const j = await apiFetch(
+        `/api/workspaces/${encodeURIComponent(workspaceId)}/channels?provider=meta`
+      );
+      setChannels(j?.channels || []);
+    } catch {
+      setChannels([]);
+    } finally {
+      setChLoading(false);
+    }
+  }
+
   async function loadThreads() {
     if (!workspaceId) return;
     setThreadsLoading(true);
@@ -175,13 +230,14 @@ export default function Inbox({ theme, setTheme }) {
       const params = new URLSearchParams();
       params.set("platform", platform);
       params.set("status", status);
+      params.set("channelId", channelId);
       if (q.trim()) params.set("q", q.trim());
 
       const j = await apiFetch(
         `/api/workspaces/${encodeURIComponent(workspaceId)}/inbox/threads?${params.toString()}`
       );
 
-      const rows = j?.threads || [];
+      const rows = sortThreadsByLastMessageDesc(j?.threads || []);
       setThreads(rows);
 
       if (!activeThreadId && rows.length) setActiveThreadId(rows[0].id);
@@ -206,7 +262,7 @@ export default function Inbox({ theme, setTheme }) {
       const j = await apiFetch(
         `/api/inbox/threads/${encodeURIComponent(threadId)}/messages?limit=500`
       );
-      setMessages(j?.messages || []);
+      setMessages(sortMessagesBySentAsc(j?.messages || []));
     } catch (e) {
       setMsgErr(String(e?.message || e));
       setMessages([]);
@@ -244,20 +300,24 @@ export default function Inbox({ theme, setTheme }) {
     try {
       const j = await apiFetch(
         `/api/inbox/threads/${encodeURIComponent(activeThreadId)}/messages`,
-        {
-          method: "POST",
-          body: JSON.stringify({ text }),
-        }
+        { method: "POST", body: JSON.stringify({ text }) }
       );
 
       const newMsg = j?.message;
+
       setReply("");
 
-      // optimistic append (realtime will also arrive, but DB id differs; safe to keep)
-      if (newMsg) setMessages((prev) => [...prev, newMsg]);
+      // optimistic append (dedupe-safe)
+      if (newMsg) {
+        setMessages((prev) => {
+          const map = new Map(prev.map((m) => [makeMsgKey(m), m]));
+          map.set(makeMsgKey(newMsg), newMsg);
+          return sortMessagesBySentAsc(Array.from(map.values()));
+        });
+      }
 
       await loadThreads();
-      // messages will be updated by realtime, but keep a hard refresh for correctness
+      // keep a hard refresh for correctness
       await loadMessages(activeThreadId);
     } catch (e) {
       alert(String(e?.message || e));
@@ -267,7 +327,12 @@ export default function Inbox({ theme, setTheme }) {
   }
 
   async function ensureRealtimeAuth() {
-    if (!supabase || !workspaceId) return;
+    if (!supabase || !workspaceId) return false;
+
+    // already authed for same workspace
+    if (rtAuthRef.current.workspaceId === workspaceId && rtAuthRef.current.token) {
+      return true;
+    }
 
     setRtStatus("connecting");
     setRtErr("");
@@ -280,14 +345,14 @@ export default function Inbox({ theme, setTheme }) {
       const token = j?.token;
       if (!token) throw new Error("Realtime token missing from server");
 
-      // Authorize realtime with custom JWT
-      // supabase-js v2:
       supabase.realtime.setAuth(token);
-
-      setRtStatus("connected");
+      rtAuthRef.current = { workspaceId, token };
+      return true;
     } catch (e) {
+      rtAuthRef.current = { workspaceId: "", token: "" };
       setRtStatus("error");
       setRtErr(String(e?.message || e));
+      return false;
     }
   }
 
@@ -297,12 +362,22 @@ export default function Inbox({ theme, setTheme }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // load channels when workspace changes
+  useEffect(() => {
+    if (!workspaceId) {
+      setChannels([]);
+      return;
+    }
+    loadChannels();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId]);
+
   // reload threads when workspace/filters change
   useEffect(() => {
     if (!workspaceId) return;
     loadThreads();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId, platform, status]);
+  }, [workspaceId, platform, status, channelId]);
 
   // search debounce
   useEffect(() => {
@@ -310,7 +385,7 @@ export default function Inbox({ theme, setTheme }) {
     const t = setTimeout(() => loadThreads(), 250);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [q, workspaceId]);
+  }, [q, workspaceId, platform, status, channelId]);
 
   // load messages when thread changes
   useEffect(() => {
@@ -336,9 +411,11 @@ export default function Inbox({ theme, setTheme }) {
     if (!supabase || !workspaceId || !realtimeOn) return;
 
     let ch;
+    let cancelled = false;
 
     (async () => {
-      await ensureRealtimeAuth();
+      const ok = await ensureRealtimeAuth();
+      if (!ok || cancelled) return;
 
       ch = supabase
         .channel(`ws:${workspaceId}:threads`)
@@ -353,14 +430,7 @@ export default function Inbox({ theme, setTheme }) {
           (payload) => {
             if (payload.eventType === "INSERT" || payload.eventType === "UPDATE") {
               const row = payload.new;
-              // keep ordering natural by refreshing snippet/time if it changes
-              setThreads((prev) => {
-                const next = upsertById(prev, row);
-                // sort by last_message_at desc (null-safe)
-                return next
-                  .slice()
-                  .sort((a, b) => (new Date(b.last_message_at || 0) - new Date(a.last_message_at || 0)));
-              });
+              setThreads((prev) => sortThreadsByLastMessageDesc(upsertById(prev, row)));
             } else if (payload.eventType === "DELETE") {
               const id = payload.old?.id;
               if (id) setThreads((prev) => removeById(prev, id));
@@ -369,10 +439,19 @@ export default function Inbox({ theme, setTheme }) {
         )
         .subscribe((status) => {
           if (status === "SUBSCRIBED") setRtStatus("connected");
+          if (status === "CHANNEL_ERROR") {
+            setRtStatus("error");
+            setRtErr("CHANNEL_ERROR");
+          }
+          if (status === "TIMED_OUT") {
+            setRtStatus("error");
+            setRtErr("TIMED_OUT");
+          }
         });
     })();
 
     return () => {
+      cancelled = true;
       try {
         if (ch) supabase.removeChannel(ch);
       } catch {}
@@ -385,9 +464,11 @@ export default function Inbox({ theme, setTheme }) {
     if (!supabase || !workspaceId || !activeThreadId || !realtimeOn) return;
 
     let ch;
+    let cancelled = false;
 
     (async () => {
-      await ensureRealtimeAuth();
+      const ok = await ensureRealtimeAuth();
+      if (!ok || cancelled) return;
 
       ch = supabase
         .channel(`thread:${activeThreadId}:messages`)
@@ -400,19 +481,14 @@ export default function Inbox({ theme, setTheme }) {
             filter: `thread_id=eq.${activeThreadId}`,
           },
           (payload) => {
-            if (payload.eventType === "INSERT") {
+            if (payload.eventType === "INSERT" || payload.eventType === "UPDATE") {
               const row = payload.new;
+
               setMessages((prev) => {
-                // append in time order (sent_at ascending)
-                const next = [...prev, row];
-                next.sort((a, b) => new Date(a.sent_at || 0) - new Date(b.sent_at || 0));
-                return next;
+                const map = new Map(prev.map((m) => [makeMsgKey(m), m]));
+                map.set(makeMsgKey(row), { ...map.get(makeMsgKey(row)), ...row });
+                return sortMessagesBySentAsc(Array.from(map.values()));
               });
-            } else if (payload.eventType === "UPDATE") {
-              const row = payload.new;
-              setMessages((prev) => upsertById(prev, row).slice().sort(
-                (a, b) => new Date(a.sent_at || 0) - new Date(b.sent_at || 0)
-              ));
             } else if (payload.eventType === "DELETE") {
               const id = payload.old?.id;
               if (id) setMessages((prev) => removeById(prev, id));
@@ -421,10 +497,19 @@ export default function Inbox({ theme, setTheme }) {
         )
         .subscribe((status) => {
           if (status === "SUBSCRIBED") setRtStatus("connected");
+          if (status === "CHANNEL_ERROR") {
+            setRtStatus("error");
+            setRtErr("CHANNEL_ERROR");
+          }
+          if (status === "TIMED_OUT") {
+            setRtStatus("error");
+            setRtErr("TIMED_OUT");
+          }
         });
     })();
 
     return () => {
+      cancelled = true;
       try {
         if (ch) supabase.removeChannel(ch);
       } catch {}
@@ -437,6 +522,15 @@ export default function Inbox({ theme, setTheme }) {
     [threads, activeThreadId]
   );
   const badge = channelBadge(activeThread?.platform);
+
+  const connectedChannels = useMemo(() => {
+    return (channels || [])
+      .filter((c) => c?.status === "connected")
+      .map((c) => ({
+        id: c.id,
+        label: `${String(c.platform || "").toUpperCase()} — ${c.display_name || c.external_id || c.id}`,
+      }));
+  }, [channels]);
 
   return (
     <AppShell theme={theme} setTheme={setTheme} active="inbox">
@@ -493,6 +587,24 @@ export default function Inbox({ theme, setTheme }) {
                   <option value="open">Open</option>
                   <option value="pending">Pending</option>
                   <option value="resolved">Resolved</option>
+                </select>
+              </span>
+
+              {/* ✅ NEW: Page / Channel filter */}
+              <span className="text-xs text-white/30">
+                Page{" "}
+                <select
+                  value={channelId}
+                  onChange={(e) => setChannelId(e.target.value)}
+                  className="ml-2 bg-background-dark/60 border border-glass-border rounded-lg px-2 py-1 text-xs text-white/80"
+                  disabled={!workspaceId || chLoading}
+                >
+                  <option value="all">{chLoading ? "Loading…" : "All Pages"}</option>
+                  {connectedChannels.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.label}
+                    </option>
+                  ))}
                 </select>
               </span>
 
@@ -624,7 +736,9 @@ export default function Inbox({ theme, setTheme }) {
                               {String(t.status || "open")}
                             </span>
 
-                            {Number(t.unread_count || 0) > 0 ? <div className="size-2 rounded-full bg-primary animate-pulse" /> : null}
+                            {Number(t.unread_count || 0) > 0 ? (
+                              <div className="size-2 rounded-full bg-primary animate-pulse" />
+                            ) : null}
                           </div>
                         </div>
                       </div>
@@ -701,7 +815,7 @@ export default function Inbox({ theme, setTheme }) {
                 messages.map((m) => {
                   const inbound = String(m.direction || "").toLowerCase() === "inbound";
                   return inbound ? (
-                    <div key={m.id} className="flex items-start gap-4 max-w-[80%]">
+                    <div key={m.id || makeMsgKey(m)} className="flex items-start gap-4 max-w-[80%]">
                       <div className="size-8 rounded-full bg-white/10 shrink-0 flex items-center justify-center">
                         <span className="text-white/70 font-black text-xs">
                           {(activeThread.participant_name || "U").slice(0, 1).toUpperCase()}
@@ -718,7 +832,7 @@ export default function Inbox({ theme, setTheme }) {
                       </div>
                     </div>
                   ) : (
-                    <div key={m.id} className="flex items-start gap-4 max-w-[80%] self-end flex-row-reverse">
+                    <div key={m.id || makeMsgKey(m)} className="flex items-start gap-4 max-w-[80%] self-end flex-row-reverse">
                       <div className="size-8 rounded-full bg-primary/20 shrink-0 border border-primary/30 flex items-center justify-center">
                         <span className="material-symbols-outlined text-primary text-sm">support_agent</span>
                       </div>
