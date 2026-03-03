@@ -33,6 +33,8 @@ import WorkspaceSettings from "./pages/workspaces/WorkspaceSettings.jsx";
 
 // CONNECTIONS (moved)
 import ChannelConnections from "./pages/connections/ChannelConnections.jsx";
+import PrivacyPolicy from "./pages/PrivacyPolicy.jsx";
+import TermsConditions from "./pages/TermsConditions.jsx";
 
 function isAuthed() {
   return !!localStorage.getItem("access_token");
@@ -107,7 +109,8 @@ export default function App() {
             <ConversationDetail theme={theme} setTheme={setTheme} />
           </RequireAuth>
         }
-      />
+      /><Route path="/privacy-policy" element={<PrivacyPolicy theme={theme} setTheme={setTheme} />} />
+<Route path="/terms" element={<TermsConditions theme={theme} setTheme={setTheme} />} />
       <Route
         path="/publisher"
         element={

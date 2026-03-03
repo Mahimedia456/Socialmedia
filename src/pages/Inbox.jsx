@@ -478,7 +478,7 @@ export default function Inbox({ theme, setTheme }) {
             event: "*",
             schema: "public",
             table: "inbox_messages",
-            filter: `thread_id=eq.${activeThreadId}`,
+filter: `workspace_id=eq.${workspaceId},thread_id=eq.${activeThreadId}`,
           },
           (payload) => {
             if (payload.eventType === "INSERT" || payload.eventType === "UPDATE") {

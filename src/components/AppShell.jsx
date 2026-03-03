@@ -1,6 +1,7 @@
 import React from "react";
 import Sidebar from "./Sidebar.jsx";
 import Topbar from "./Topbar.jsx";
+import Footer from "./Footer.jsx";
 
 export default function AppShell({
   theme,
@@ -8,7 +9,7 @@ export default function AppShell({
   active = "dashboard",
   children,
 
-  // ✅ optional: page-controlled topbar search
+  // optional: page-controlled topbar search
   topSearchPlaceholder,
   topSearchValue,
   onTopSearchChange,
@@ -26,7 +27,14 @@ export default function AppShell({
             topSearchValue={topSearchValue}
             onTopSearchChange={onTopSearchChange}
           />
-          <div className="flex-1 overflow-y-auto p-8 custom-scrollbar">{children}</div>
+
+          {/* ✅ Content scroll area */}
+          <div className="flex-1 min-h-0 overflow-y-auto p-8 custom-scrollbar">
+            {children}
+          </div>
+
+          {/* ✅ Sticky footer at bottom of main */}
+          <Footer />
         </main>
       </div>
     </div>

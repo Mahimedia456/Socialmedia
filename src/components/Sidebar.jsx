@@ -81,7 +81,10 @@ export default function Sidebar({ active = "dashboard" }) {
     };
   }, []);
 
-  const wsId = useMemo(() => String(activeWorkspaceId || "").trim(), [activeWorkspaceId]);
+  const wsId = useMemo(
+    () => String(activeWorkspaceId || "").trim(),
+    [activeWorkspaceId]
+  );
   const hasWs = !!wsId;
 
   const handleLogout = () => {
@@ -94,9 +97,10 @@ export default function Sidebar({ active = "dashboard" }) {
   };
 
   return (
-    <aside className="w-[280px] glass-sidebar flex flex-col h-full z-30">
+    // ✅ FIX: stable full height + allow inner scroll
+    <aside className="w-[280px] glass-sidebar flex flex-col h-screen min-h-0 z-30 overflow-hidden">
       {/* Header */}
-      <div className="p-8 flex items-center gap-3">
+      <div className="p-8 flex items-center gap-3 shrink-0">
         <div className="size-10 rounded-xl overflow-hidden active-glow bg-white/5 border border-primary/20 flex items-center justify-center">
           <img src={logo} alt="Mahimedia" className="h-7 w-auto object-contain" />
         </div>
@@ -111,8 +115,8 @@ export default function Sidebar({ active = "dashboard" }) {
         </div>
       </div>
 
-      {/* Nav */}
-      <nav className="flex-1 px-4 space-y-1 mt-2">
+      {/* ✅ FIX: nav scroll area (never pushes bottom outside) */}
+      <nav className="flex-1 min-h-0 px-4 space-y-1 mt-2 overflow-y-auto custom-scrollbar">
         <Item to="/dashboard" icon="dashboard" label="Dashboard" active={active === "dashboard"} />
         <Item to="/inbox" icon="inbox" label="Inbox" badge="12" active={active === "inbox"} />
         <Item to="/publisher" icon="send" label="Publisher" active={active === "publisher"} />
@@ -120,7 +124,7 @@ export default function Sidebar({ active = "dashboard" }) {
         <Item to="/analytics" icon="analytics" label="Analytics" active={active === "analytics"} />
         <Item to="/contacts" icon="group" label="Contacts" active={active === "contacts"} />
 
-        {/* ✅ Global Connections */}
+        {/* Global Connections */}
         <Item
           to="/connections"
           icon="add_link"
@@ -180,8 +184,8 @@ export default function Sidebar({ active = "dashboard" }) {
         </div>
       </nav>
 
-      {/* Bottom */}
-      <div className="p-4 mt-auto border-t border-white/5">
+      {/* Bottom (sticky) */}
+      <div className="p-4 border-t border-white/5 shrink-0">
         <NavLink
           to="/settings"
           className="flex items-center gap-3 px-4 py-3 rounded-xl hover:bg-white/5 text-slate-400 hover:text-white transition-all"
