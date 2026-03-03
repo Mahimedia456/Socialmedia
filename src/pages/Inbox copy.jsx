@@ -1,7 +1,6 @@
 // src/pages/Inbox.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import AppShell from "../components/AppShell.jsx";
-import { supabase } from "../lib/supabaseClient"; // ✅ make sure this exists
 
 function channelBadge(platform) {
   const p = String(platform || "").toLowerCase();
@@ -104,13 +103,13 @@ export default function Inbox({ theme, setTheme }) {
   const [reply, setReply] = useState("");
   const [sending, setSending] = useState(false);
 
-  // ✅ REALTIME toggle (Supabase Realtime)
+  // REALTIME toggle
   const [realtimeOn, setRealtimeOn] = useState(true);
   const [rtStatus, setRtStatus] = useState("idle"); // idle | connecting | connected | error
   const [rtErr, setRtErr] = useState("");
 
   const endRef = useRef(null);
-  const rtRef = useRef({ ch1: null, ch2: null });
+  const esRef = useRef(null);
 
   function getAccessToken() {
     return localStorage.getItem("access_token") || "";
@@ -249,7 +248,7 @@ export default function Inbox({ theme, setTheme }) {
         : "";
 
       alert(
-        `Sync done ✅ (DB)\nThreads: ${r?.threads_upserted ?? 0}\nMessages: ${
+        `Sync done ✅ (MEMORY ONLY)\nThreads: ${r?.threads_upserted ?? 0}\nMessages: ${
           r?.messages_upserted ?? 0
         }\nIG Threads: ${r?.ig_threads_upserted ?? 0}\nIG Messages: ${
           r?.ig_messages_upserted ?? 0
@@ -344,115 +343,102 @@ export default function Inbox({ theme, setTheme }) {
     return () => clearTimeout(t);
   }, [activeThreadId, messages.length]);
 
-  // ✅ Supabase Realtime subscriptions (DB changes)
+  // ✅ REALTIME via SSE
   useEffect(() => {
-    // cleanup old channels
-    try {
-      rtRef.current.ch1?.unsubscribe?.();
-      rtRef.current.ch2?.unsubscribe?.();
-    } catch {}
-    rtRef.current = { ch1: null, ch2: null };
-
     if (!workspaceId || !realtimeOn) {
       setRtStatus("idle");
       setRtErr("");
+      try {
+        esRef.current?.close?.();
+      } catch {}
+      esRef.current = null;
       return;
     }
+
+    // close existing
+    try {
+      esRef.current?.close?.();
+    } catch {}
+    esRef.current = null;
 
     setRtStatus("connecting");
     setRtErr("");
 
-    // 1) threads changes for this workspace
-    const ch1 = supabase
-      .channel(`rt_threads_${workspaceId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "inbox_threads",
-          filter: `workspace_id=eq.${workspaceId}`,
-        },
-        (payload) => {
-          const row = payload.new || payload.old;
-          if (!row?.id) return;
+    const token = getAccessToken();
+    const url =
+      `${API_BASE}/api/workspaces/${encodeURIComponent(workspaceId)}/inbox/stream` +
+      `?access_token=${encodeURIComponent(token)}`;
 
-          setThreads((prev) => {
-            const next = [row, ...prev.filter((t) => String(t.id) !== String(row.id))];
+    const es = new EventSource(url);
+    esRef.current = es;
 
-            // keep current filters client-side (optional)
-            let out = next;
-            if (platform !== "all") out = out.filter((t) => String(t.platform) === platform);
-            if (status !== "all") out = out.filter((t) => String(t.status) === status);
-            if (channelId !== "all") out = out.filter((t) => String(t.channel_id) === channelId);
+    const onHello = (e) => {
+      setRtStatus("connected");
+      setRtErr("");
+    };
 
-            return sortThreadsByLastMessageDesc(out);
-          });
-        }
-      )
-      .subscribe((st) => {
-        if (st === "SUBSCRIBED") {
-          setRtStatus("connected");
-          setRtErr("");
-        }
-        if (st === "CHANNEL_ERROR" || st === "TIMED_OUT") {
-          setRtStatus("error");
-          setRtErr(String(st));
-        }
-      });
+    const onPing = () => {
+      // no-op
+    };
 
-    // 2) messages inserts for active thread (recreate when activeThreadId changes)
-    const ch2 = supabase
-      .channel(`rt_msgs_${workspaceId}_${activeThreadId || "none"}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "inbox_messages",
-          filter: activeThreadId ? `thread_id=eq.${activeThreadId}` : undefined,
-        },
-        (payload) => {
-          const row = payload.new;
-          if (!row) return;
+    const onThreadUpsert = (e) => {
+      try {
+        const row = JSON.parse(e.data);
+        setThreads((prev) => sortThreadsByLastMessageDesc([row, ...prev.filter((t) => t.id !== row.id)]));
+      } catch {}
+    };
 
+    const onMessageUpsert = (e) => {
+      try {
+        const row = JSON.parse(e.data);
+
+        // update messages if active thread
+        if (String(row.thread_id) === String(activeThreadId)) {
           setMessages((prev) => {
             const map = new Map(prev.map((m) => [makeMsgKey(m), m]));
-            map.set(makeMsgKey(row), row);
+            map.set(makeMsgKey(row), { ...map.get(makeMsgKey(row)), ...row });
             return sortMessagesBySentAsc(Array.from(map.values()));
           });
-
-          // also bump snippet ordering locally
-          setThreads((prev) => {
-            const idx = prev.findIndex((t) => String(t.id) === String(row.thread_id));
-            if (idx === -1) return prev;
-            const t = prev[idx];
-            const next = prev.slice();
-            next[idx] = {
-              ...t,
-              last_message_at: row.sent_at || t.last_message_at,
-              last_message_snippet: row.text ? String(row.text).slice(0, 200) : t.last_message_snippet,
-              updated_at: new Date().toISOString(),
-            };
-            return sortThreadsByLastMessageDesc(next);
-          });
         }
-      )
-      .subscribe();
 
-    rtRef.current = { ch1, ch2 };
+        // update thread snippet ordering
+        setThreads((prev) => {
+          const idx = prev.findIndex((t) => t.id === row.thread_id);
+          if (idx === -1) return prev;
+          const t = prev[idx];
+          const next = prev.slice();
+          next[idx] = {
+            ...t,
+            last_message_at: row.sent_at || t.last_message_at,
+            last_message_snippet: row.text ? String(row.text).slice(0, 200) : t.last_message_snippet,
+            updated_at: new Date().toISOString(),
+          };
+          return sortThreadsByLastMessageDesc(next);
+        });
+      } catch {}
+    };
+
+    const onError = () => {
+      setRtStatus("error");
+      setRtErr("SSE_DISCONNECTED");
+    };
+
+    es.addEventListener("hello", onHello);
+    es.addEventListener("ping", onPing);
+    es.addEventListener("thread_upsert", onThreadUpsert);
+    es.addEventListener("message_upsert", onMessageUpsert);
+    es.onerror = onError;
 
     return () => {
       try {
-        ch1?.unsubscribe?.();
-        ch2?.unsubscribe?.();
+        es.close();
       } catch {}
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workspaceId, realtimeOn, activeThreadId, platform, status, channelId]);
+  }, [workspaceId, realtimeOn, activeThreadId]);
 
   const activeThread = useMemo(
-    () => threads.find((t) => String(t.id) === String(activeThreadId)) || null,
+    () => threads.find((t) => t.id === activeThreadId) || null,
     [threads, activeThreadId]
   );
   const badge = channelBadge(activeThread?.platform);
@@ -553,7 +539,7 @@ export default function Inbox({ theme, setTheme }) {
                 onClick={() => setRealtimeOn((v) => !v)}
                 disabled={!workspaceId}
                 className="px-3 py-2 rounded-xl border border-glass-border text-white/80 text-xs font-bold hover:bg-white/5 disabled:opacity-50"
-                title="Realtime via Supabase"
+                title="Realtime via SSE"
               >
                 Realtime: {realtimeOn ? "ON" : "OFF"}
               </button>
@@ -621,7 +607,7 @@ export default function Inbox({ theme, setTheme }) {
                 </div>
               ) : (
                 threads.map((t) => {
-                  const isActive = String(t.id) === String(activeThreadId);
+                  const isActive = t.id === activeThreadId;
                   const b = channelBadge(t.platform);
 
                   return (

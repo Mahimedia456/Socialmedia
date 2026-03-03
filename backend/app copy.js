@@ -66,8 +66,6 @@ const T_WSM = "workspace_members";
 // Connections
 const T_CHANNELS = "workspace_channels";
 const T_CHANNEL_TOKENS = "channel_tokens";
-const T_INBOX_THREADS = "inbox_threads";
-const T_INBOX_MESSAGES = "inbox_messages";
 
 /* ---------------- Channel status mapping ---------------- */
 const CHANNEL_STATUS_CONNECTED =
