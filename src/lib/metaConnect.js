@@ -30,14 +30,19 @@ export function buildMetaAuthUrl({ workspaceId }) {
   if (!REDIRECT_URI) throw new Error("Missing VITE_META_REDIRECT_URI");
   if (!workspaceId) throw new Error("Missing workspaceId");
 
-  const SCOPES = [
-    "pages_show_list",
-    "pages_read_engagement",
-    "pages_manage_metadata",
-    "pages_messaging",
-    "instagram_basic",
-    "instagram_manage_messages",
-  ].join(",");
+const scope = [
+  "public_profile",
+  "email",
+  "pages_show_list",
+  "pages_read_engagement",
+  "pages_manage_metadata",
+  "pages_messaging",
+  // optional but commonly needed
+  "business_management",
+  // IG (won’t work unless your app has IG messaging permission/product properly enabled)
+  "instagram_basic",
+  "instagram_manage_messages",
+].join(",");
 
   const state = b64urlEncode(
     JSON.stringify({ workspaceId, t: Date.now(), nonce: randomString(12) })

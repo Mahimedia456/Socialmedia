@@ -397,17 +397,30 @@ async function exchangeMetaCodeForToken({ code }) {
 }
 
 async function fetchMetaPages({ userAccessToken }) {
-  // 1) Get ALL pages (pagination)
-  let url =
-    `https://graph.facebook.com/${META_GRAPH_VERSION}/me/accounts` +
-    `?fields=id,name,access_token` +
-    `&limit=200` +
-    `&access_token=${encodeURIComponent(userAccessToken)}`;
+  const out = [];
+  let after = null;
 
-  const pages = [];
+  while (true) {
+    const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/me/accounts`);
+    url.searchParams.set(
+      "fields",
+      [
+        "id",
+        "name",
+        "access_token",
+        // IG Business
+        "instagram_business_account{id,username}",
+        // Sometimes IG is exposed here instead
+        "connected_instagram_account{id,username}",
+        // Useful to debug why a page is missing
+        "tasks",
+      ].join(",")
+    );
+    url.searchParams.set("limit", "100");
+    if (after) url.searchParams.set("after", after);
+    url.searchParams.set("access_token", userAccessToken);
 
-  while (url) {
-    const r = await fetch(url);
+    const r = await fetch(url.toString());
     const j = await r.json().catch(() => ({}));
 
     console.log("META /me/accounts PAGE:", JSON.stringify(j, null, 2));
@@ -417,55 +430,16 @@ async function fetchMetaPages({ userAccessToken }) {
       throw new Error(msg);
     }
 
-    pages.push(...(j?.data || []));
-    url = j?.paging?.next || null;
+    out.push(...(j?.data || []));
+
+    const nextAfter = j?.paging?.cursors?.after || null;
+    if (!nextAfter) break;
+    after = nextAfter;
+
+    if (out.length >= 1000) break; // safety
   }
 
-  // 2) For each page, fetch IG linkage (this is more reliable than trying inside /me/accounts)
-  const enriched = [];
-  for (const p of pages) {
-    const pageId = String(p.id || "");
-    const pageToken = String(p.access_token || "");
-
-    let igId = null;
-    let igUsername = null;
-
-    if (pageId && pageToken) {
-      try {
-        const igUrl =
-          `https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}` +
-          `?fields=instagram_business_account{id,username},connected_instagram_account{id,username}` +
-          `&access_token=${encodeURIComponent(pageToken)}`;
-
-        const r2 = await fetch(igUrl);
-        const j2 = await r2.json().catch(() => ({}));
-
-        console.log(`META /${pageId} IG LINK:`, JSON.stringify(j2, null, 2));
-
-        if (r2.ok) {
-          const ig =
-            j2?.instagram_business_account ||
-            j2?.connected_instagram_account ||
-            null;
-
-          if (ig?.id) igId = String(ig.id);
-          if (ig?.username) igUsername = String(ig.username);
-        }
-      } catch (e) {
-        // don’t fail whole exchange if IG lookup fails for one page
-        console.warn("IG lookup failed for page:", pageId, e?.message || e);
-      }
-    }
-
-    enriched.push({
-      id: pageId,
-      name: String(p.name || "Facebook Page"),
-      access_token: pageToken,
-      instagram_business_account: igId ? { id: igId, username: igUsername } : null,
-    });
-  }
-
-  return enriched;
+  return out;
 }
 
 /* --------- FB Messenger pagination --------- */
@@ -1286,15 +1260,21 @@ app.post("/api/meta/exchange", requireAuth, async (req, res, next) => {
     const userAccessToken = token.access_token;
     const pages = await fetchMetaPages({ userAccessToken });
 
-const normalized = (pages || []).map((p) => ({
-  pageId: String(p.id),
-  pageName: String(p.name || "Facebook Page"),
-  pageToken: String(p.access_token || ""),
-  igId: p.instagram_business_account?.id ? String(p.instagram_business_account.id) : null,
-  igUsername: p.instagram_business_account?.username
-    ? String(p.instagram_business_account.username)
-    : null,
-}));
+const normalized = (pages || []).map((p) => {
+  const ig =
+    p.instagram_business_account ||
+    p.connected_instagram_account ||
+    null;
+
+  return {
+    pageId: String(p.id),
+    pageName: String(p.name || "Facebook Page"),
+    pageToken: String(p.access_token || ""),
+    igId: ig?.id ? String(ig.id) : null,
+    igUsername: ig?.username ? String(ig.username) : null,
+    tasks: Array.isArray(p.tasks) ? p.tasks : [],
+  };
+});
 
     return res.json({
       ok: true,
