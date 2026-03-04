@@ -888,11 +888,8 @@ export default function Feeds({ theme, setTheme }) {
 
                 {/* Channel */}
                 <select
-/* Improves select dropdown in some browsers */
-select, option {
-  background-color: #182527; /* surface-dark */
-  color: #ffffff;
-}                  value={selectedChannelId}
+                  className="bg-surface-dark border border-primary/10 rounded-xl px-3 py-2 text-sm text-white/80 focus:ring-1 focus:ring-primary focus:border-primary outline-none min-w-[260px]"
+                  value={selectedChannelId}
                   onChange={(e) => setSelectedChannelId(e.target.value)}
                   disabled={!workspaceId || !filteredChannels.length}
                 >
