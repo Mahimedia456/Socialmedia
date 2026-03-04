@@ -10,8 +10,9 @@ import ResetPassword from "./pages/auth/ResetPassword.jsx";
 import VerifyEmail from "./pages/auth/VerifyEmail.jsx";
 import MetaCallback from "./pages/auth/MetaCallback.jsx";
 
-// MAIN (still root pages)
+// MAIN
 import Dashboard from "./pages/Dashboard.jsx";
+import Feeds from "./pages/Feeds.jsx"; // ✅ added
 import Inbox from "./pages/Inbox.jsx";
 import ConversationDetail from "./pages/ConversationDetail.jsx";
 import Publisher from "./pages/Publisher.jsx";
@@ -19,7 +20,7 @@ import Analytics from "./pages/Analytics.jsx";
 import Contacts from "./pages/Contacts.jsx";
 import Calendar from "./pages/Calendar.jsx";
 
-// SETTINGS (root pages)
+// SETTINGS
 import Settings from "./pages/Settings.jsx";
 import InboxRules from "./pages/InboxRules.jsx";
 import TeamRoles from "./pages/TeamRoles.jsx";
@@ -33,6 +34,8 @@ import WorkspaceSettings from "./pages/workspaces/WorkspaceSettings.jsx";
 
 // CONNECTIONS (moved)
 import ChannelConnections from "./pages/connections/ChannelConnections.jsx";
+
+// LEGAL
 import PrivacyPolicy from "./pages/PrivacyPolicy.jsx";
 import TermsConditions from "./pages/TermsConditions.jsx";
 
@@ -75,7 +78,7 @@ export default function App() {
         element={<ResetPassword theme={theme} setTheme={setTheme} />}
       />
 
-      {/* ✅ Meta callback (redirectUri points here) */}
+      {/* Meta callback */}
       <Route
         path="/auth/meta/callback"
         element={
@@ -83,6 +86,16 @@ export default function App() {
             <MetaCallback />
           </RequireAuth>
         }
+      />
+
+      {/* Legal */}
+      <Route
+        path="/privacy-policy"
+        element={<PrivacyPolicy theme={theme} setTheme={setTheme} />}
+      />
+      <Route
+        path="/terms"
+        element={<TermsConditions theme={theme} setTheme={setTheme} />}
       />
 
       {/* Main */}
@@ -94,6 +107,17 @@ export default function App() {
           </RequireAuth>
         }
       />
+
+      {/* ✅ Added because Sidebar uses /feeds */}
+      <Route
+        path="/feeds"
+        element={
+          <RequireAuth>
+            <Feeds theme={theme} setTheme={setTheme} />
+          </RequireAuth>
+        }
+      />
+
       <Route
         path="/inbox"
         element={
@@ -106,11 +130,11 @@ export default function App() {
         path="/conversations/:id"
         element={
           <RequireAuth>
-            <ConversationDetail theme={theme} setTheme={setTheme} />
+            <ConversationDetail theme={theme} setTheme={setsetThemeSafe(setTheme)} />
           </RequireAuth>
         }
-      /><Route path="/privacy-policy" element={<PrivacyPolicy theme={theme} setTheme={setTheme} />} />
-<Route path="/terms" element={<TermsConditions theme={theme} setTheme={setTheme} />} />
+      />
+
       <Route
         path="/publisher"
         element={
@@ -144,7 +168,7 @@ export default function App() {
         }
       />
 
-      {/* ✅ GLOBAL Connections page (no workspace required) */}
+      {/* Global Connections */}
       <Route
         path="/connections"
         element={
@@ -208,8 +232,6 @@ export default function App() {
           </RequireAuth>
         }
       />
-
-      {/* ✅ Workspace Connections (still supported) */}
       <Route
         path="/workspaces/:workspaceId/connections"
         element={
@@ -218,7 +240,6 @@ export default function App() {
           </RequireAuth>
         }
       />
-
       <Route
         path="/workspaces/:workspaceId/settings"
         element={
@@ -227,7 +248,6 @@ export default function App() {
           </RequireAuth>
         }
       />
-
       <Route
         path="/workspaces/:workspaceId"
         element={
@@ -244,4 +264,12 @@ export default function App() {
       />
     </Routes>
   );
+}
+
+/**
+ * ✅ tiny helper: prevents accidental "undefined is not a function" if something passes wrong setTheme
+ * (optional safety)
+ */
+function setsetThemeSafe(setTheme) {
+  return typeof setTheme === "function" ? setTheme : () => {};
 }

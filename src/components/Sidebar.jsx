@@ -118,6 +118,7 @@ export default function Sidebar({ active = "dashboard" }) {
       {/* ✅ FIX: nav scroll area (never pushes bottom outside) */}
       <nav className="flex-1 min-h-0 px-4 space-y-1 mt-2 overflow-y-auto custom-scrollbar">
         <Item to="/dashboard" icon="dashboard" label="Dashboard" active={active === "dashboard"} />
+          <Item to="/feeds" icon="dynamic_feed" label="Feeds" active={active === "feeds"} />
         <Item to="/inbox" icon="inbox" label="Inbox" badge="12" active={active === "inbox"} />
         <Item to="/publisher" icon="send" label="Publisher" active={active === "publisher"} />
         <Item to="/calendar" icon="calendar_today" label="Calendar" active={active === "calendar"} />
