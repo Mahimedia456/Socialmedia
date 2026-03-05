@@ -1,18 +1,18 @@
-import app, { ensureDevUsers } from "./app.js";
+import app from "./app.js";
+import { env } from "./config/env.js";
+import { ensureDevUsers } from "./services/devUsers.service.js";
 
-const PORT = Number(process.env.PORT || 4000);
+async function main() {
+  try {
+    await ensureDevUsers();
 
-async function boot() {
-  await ensureDevUsers();
-  app.listen(PORT, () => {
-    console.log(`Backend running: http://localhost:${PORT}`);
-    console.log(`Health: http://localhost:${PORT}/api/health`);
-    console.log(`Meta webhook verify URL: http://localhost:${PORT}/api/meta/webhook`);
-    console.log(`Meta webhook alias URL: http://localhost:${PORT}/api/webhooks/meta`);
-  });
+    app.listen(env.PORT, () => {
+      console.log(`✅ API running: http://localhost:${env.PORT}`);
+    });
+  } catch (e) {
+    console.error("❌ Server boot failed:", e?.message || e);
+    process.exit(1);
+  }
 }
 
-boot().catch((e) => {
-  console.error("Boot failed:", e);
-  process.exit(1);
-});
+main();

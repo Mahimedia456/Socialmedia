@@ -466,333 +466,394 @@ export default function Inbox({ theme, setTheme }) {
       }));
   }, [channels]);
 
-  return (
-    <AppShell theme={theme} setTheme={setTheme} active="inbox">
-      <div className="flex flex-col h-[calc(100vh-0px)] min-h-0">
-        {/* Header */}
-        <div className="px-8 py-6 flex items-center justify-between shrink-0">
+ return (
+  <AppShell theme={theme} setTheme={setTheme} active="inbox">
+    <div className="h-[calc(100vh-0px)] min-h-0 flex flex-col overflow-hidden">
+      {/* Top Bar (matches screenshot) */}
+      <div className="shrink-0 px-6 py-4 flex items-center justify-between">
+        <div className="flex items-center gap-6 min-w-0">
           <div className="min-w-0">
-            <h2 className="text-3xl font-bold text-[#E4E5E6] tracking-tight">Inbox</h2>
-            <p className="text-white/50 text-sm mt-1">
-              Manage conversations across all connected channels
-            </p>
+            <div className="text-white/70 text-xs font-semibold">Workspace Inbox</div>
+            <div className="text-white text-xl font-black tracking-tight">Inbox</div>
+          </div>
 
-            <div className="mt-3 flex items-center gap-3 flex-wrap">
-              <div className="text-xs text-white/50 font-semibold">Workspace</div>
+          {/* Tabs */}
+          <div className="flex items-center gap-6 border-b border-white/10">
+            <button className="text-sm font-bold text-primary pb-2 border-b-2 border-primary">
+              All Messages
+            </button>
+            <button className="text-sm font-semibold text-white/50 hover:text-white/70 pb-2">
+              Mentions
+            </button>
+            <button className="text-sm font-semibold text-white/50 hover:text-white/70 pb-2">
+              Reviews
+            </button>
+          </div>
+        </div>
 
-              <select
-                value={workspaceId}
-                onChange={(e) => selectWorkspace(e.target.value)}
-                className="bg-background-dark/60 border border-glass-border rounded-xl px-3 py-2 text-sm text-white/80 focus:ring-1 focus:ring-primary focus:border-primary"
-              >
-                <option value="">{wsLoading ? "Loading…" : "Select workspace…"}</option>
-                {workspaces.map((w) => (
-                  <option key={w.id} value={w.id}>
-                    {w.name}
-                  </option>
-                ))}
-              </select>
+        {/* Global search */}
+        <div className="w-[420px] max-w-[40vw]">
+          <div className="relative">
+            <input
+              className="w-full bg-white/5 border border-white/10 rounded-2xl pl-11 pr-4 py-2.5 text-sm text-white/80 placeholder:text-white/30 focus:ring-1 focus:ring-primary focus:border-primary"
+              placeholder="Global search..."
+              type="text"
+            />
+            <span className="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-white/40">
+              search
+            </span>
+          </div>
+        </div>
+      </div>
 
-              {wsErr ? <span className="text-xs text-red-200">{wsErr}</span> : null}
+      {/* Control strip (keep your selects + sync + refresh + realtime) */}
+      <div className="shrink-0 px-6 pb-4 flex items-center gap-3 flex-wrap">
+        <div className="text-xs text-white/50 font-semibold">Workspace</div>
+        <select
+          value={workspaceId}
+          onChange={(e) => selectWorkspace(e.target.value)}
+          className="bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-sm text-white/80 focus:ring-1 focus:ring-primary focus:border-primary"
+        >
+          <option value="">{wsLoading ? "Loading…" : "Select workspace…"}</option>
+          {workspaces.map((w) => (
+            <option key={w.id} value={w.id}>
+              {w.name}
+            </option>
+          ))}
+        </select>
+        {wsErr ? <span className="text-xs text-red-200">{wsErr}</span> : null}
 
-              <span className="text-xs text-white/30">
-                Platform{" "}
-                <select
-                  value={platform}
-                  onChange={(e) => setPlatform(e.target.value)}
-                  className="ml-2 bg-background-dark/60 border border-glass-border rounded-lg px-2 py-1 text-xs text-white/80"
-                  disabled={!workspaceId}
-                >
-                  <option value="all">All</option>
-                  <option value="facebook">Facebook</option>
-                  <option value="instagram">Instagram</option>
-                </select>
-              </span>
+        <span className="text-xs text-white/30">
+          Platform{" "}
+          <select
+            value={platform}
+            onChange={(e) => setPlatform(e.target.value)}
+            className="ml-2 bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-xs text-white/80"
+            disabled={!workspaceId}
+          >
+            <option value="all">All</option>
+            <option value="facebook">Facebook</option>
+            <option value="instagram">Instagram</option>
+          </select>
+        </span>
 
-              <span className="text-xs text-white/30">
-                Status{" "}
-                <select
-                  value={status}
-                  onChange={(e) => setStatus(e.target.value)}
-                  className="ml-2 bg-background-dark/60 border border-glass-border rounded-lg px-2 py-1 text-xs text-white/80"
-                  disabled={!workspaceId}
-                >
-                  <option value="all">All</option>
-                  <option value="open">Open</option>
-                  <option value="pending">Pending</option>
-                  <option value="resolved">Resolved</option>
-                </select>
-              </span>
+        <span className="text-xs text-white/30">
+          Status{" "}
+          <select
+            value={status}
+            onChange={(e) => setStatus(e.target.value)}
+            className="ml-2 bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-xs text-white/80"
+            disabled={!workspaceId}
+          >
+            <option value="all">All</option>
+            <option value="open">Open</option>
+            <option value="pending">Pending</option>
+            <option value="resolved">Resolved</option>
+          </select>
+        </span>
 
-              <span className="text-xs text-white/30">
-                Page{" "}
-                <select
-                  value={channelId}
-                  onChange={(e) => setChannelId(e.target.value)}
-                  className="ml-2 bg-background-dark/60 border border-glass-border rounded-lg px-2 py-1 text-xs text-white/80"
-                  disabled={!workspaceId || chLoading}
-                >
-                  <option value="all">{chLoading ? "Loading…" : "All Pages"}</option>
-                  {connectedChannels.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.label}
-                    </option>
-                  ))}
-                </select>
-              </span>
+        <span className="text-xs text-white/30">
+          Page{" "}
+          <select
+            value={channelId}
+            onChange={(e) => setChannelId(e.target.value)}
+            className="ml-2 bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-xs text-white/80"
+            disabled={!workspaceId || chLoading}
+          >
+            <option value="all">{chLoading ? "Loading…" : "All Pages"}</option>
+            {connectedChannels.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+        </span>
 
-              <button
-                onClick={syncInbox}
-                disabled={!workspaceId || threadsLoading}
-                className="px-3 py-2 rounded-xl border border-glass-border text-white/80 text-xs font-bold hover:bg-white/5 disabled:opacity-50"
-              >
-                Sync Inbox
-              </button>
+        <button
+          onClick={syncInbox}
+          disabled={!workspaceId || threadsLoading}
+          className="px-3 py-2 rounded-xl border border-white/10 text-white/80 text-xs font-bold hover:bg-white/5 disabled:opacity-50"
+        >
+          Sync Inbox
+        </button>
 
-              <button
-                onClick={() => setRealtimeOn((v) => !v)}
+        <button
+          onClick={loadThreads}
+          disabled={!workspaceId || threadsLoading}
+          className="px-3 py-2 rounded-xl border border-white/10 text-white/80 text-xs font-bold hover:bg-white/5 disabled:opacity-50 flex items-center gap-2"
+        >
+          <span className="material-symbols-outlined text-sm">refresh</span>
+          Refresh
+        </button>
+
+        <button
+          onClick={() => setRealtimeOn((v) => !v)}
+          disabled={!workspaceId}
+          className="px-3 py-2 rounded-xl border border-white/10 text-white/80 text-xs font-bold hover:bg-white/5 disabled:opacity-50"
+          title="Realtime via Supabase"
+        >
+          Realtime: {realtimeOn ? "ON" : "OFF"}
+        </button>
+
+        <span className="text-[11px] text-white/30">
+          RT: {rtStatus}
+          {rtErr ? <span className="text-red-200"> • {rtErr}</span> : null}
+        </span>
+      </div>
+
+      {/* Main 3-column area */}
+      <div className="flex-1 min-h-0 px-6 pb-6 flex gap-5 overflow-hidden">
+        {/* Icon rail (matches screenshot left mini icons) */}
+        <div className="w-[72px] shrink-0 rounded-2xl bg-white/5 border border-white/10 overflow-hidden flex flex-col items-center py-4 gap-3">
+          <button className="size-11 rounded-2xl bg-primary/20 border border-primary/30 text-primary flex items-center justify-center">
+            <span className="material-symbols-outlined">apps</span>
+          </button>
+          <button className="size-11 rounded-2xl bg-white/0 hover:bg-white/5 border border-white/10 text-white/60 flex items-center justify-center">
+            <span className="material-symbols-outlined">campaign</span>
+          </button>
+          <button className="size-11 rounded-2xl bg-white/0 hover:bg-white/5 border border-white/10 text-white/60 flex items-center justify-center">
+            <span className="material-symbols-outlined">reviews</span>
+          </button>
+          <button className="size-11 rounded-2xl bg-white/0 hover:bg-white/5 border border-white/10 text-white/60 flex items-center justify-center">
+            <span className="material-symbols-outlined">photo_camera</span>
+          </button>
+        </div>
+
+        {/* Threads list */}
+        <div className="w-[420px] max-w-[40vw] min-h-0 rounded-2xl bg-white/5 border border-white/10 overflow-hidden flex flex-col">
+          {/* Search + pills */}
+          <div className="p-4 border-b border-white/10 space-y-3 shrink-0">
+            <div className="relative">
+              <input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                className="w-full bg-white/5 border border-white/10 rounded-2xl pl-10 pr-4 py-2 text-sm text-white/80 placeholder:text-white/30 focus:ring-1 focus:ring-primary focus:border-primary"
+                placeholder="Search conversations..."
+                type="text"
                 disabled={!workspaceId}
-                className="px-3 py-2 rounded-xl border border-glass-border text-white/80 text-xs font-bold hover:bg-white/5 disabled:opacity-50"
-                title="Realtime via Supabase"
-              >
-                Realtime: {realtimeOn ? "ON" : "OFF"}
-              </button>
+              />
+              <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-white/40">
+                search
+              </span>
+            </div>
 
-              <span className="text-[11px] text-white/30">
-                RT: {rtStatus}
-                {rtErr ? <span className="text-red-200"> • {rtErr}</span> : null}
+            <div className="flex items-center gap-2">
+              {/* These pills are UI-only (your actual filtering still uses Status select above) */}
+              <span className="px-4 py-1.5 rounded-full bg-primary text-background-dark text-xs font-black">
+                Open
+              </span>
+              <span className="px-4 py-1.5 rounded-full bg-white/5 border border-white/10 text-xs font-bold text-white/70">
+                Pending
+              </span>
+              <span className="px-4 py-1.5 rounded-full bg-white/5 border border-white/10 text-xs font-bold text-white/70">
+                Resolved
               </span>
             </div>
 
             {threadsErr ? (
-              <div className="mt-2 text-xs text-red-200/90 whitespace-pre-wrap">{threadsErr}</div>
+              <div className="text-xs text-red-200/90 whitespace-pre-wrap">{threadsErr}</div>
             ) : null}
           </div>
 
-          <div className="flex items-center gap-3">
-            <button
-              onClick={loadThreads}
-              disabled={!workspaceId || threadsLoading}
-              className="px-5 py-2.5 rounded-xl border border-glass-border text-white text-sm font-bold hover:bg-white/5 transition-all flex items-center gap-2 disabled:opacity-50"
-            >
-              <span className="material-symbols-outlined text-lg">refresh</span>
-              Refresh
-            </button>
+          <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
+            {!workspaceId ? (
+              <div className="p-8 text-center text-white/40 text-sm">Select a workspace first.</div>
+            ) : threadsLoading ? (
+              <div className="p-8 text-white/50 text-sm">Loading conversations…</div>
+            ) : threads.length === 0 ? (
+              <div className="p-8 text-center text-white/40 text-sm">
+                No conversations yet. Click <b>Sync Inbox</b> to backfill from Meta.
+              </div>
+            ) : (
+              threads.map((t) => {
+                const isActive = String(t.id) === String(activeThreadId);
+                const b = channelBadge(t.platform);
 
+                return (
+                  <div
+                    key={t.id}
+                    onClick={() => setActiveThreadId(t.id)}
+                    className={[
+                      "cursor-pointer border-b border-white/10",
+                      isActive ? "bg-primary/10" : "hover:bg-white/5",
+                    ].join(" ")}
+                  >
+                    <div className="p-4 flex items-center gap-3">
+                      {/* Avatar + channel icon */}
+                      <div className="relative shrink-0">
+                        <div className="size-11 rounded-full bg-white/10 flex items-center justify-center">
+                          <span className="text-white/80 font-black text-sm">
+                            {(t.participant_name || "U").slice(0, 1).toUpperCase()}
+                          </span>
+                        </div>
+                        <div className="absolute -bottom-1 -right-1 size-5 rounded-full bg-[#0b1f22] flex items-center justify-center p-[2px]">
+                          <div className={`w-full h-full rounded-full flex items-center justify-center ${b.iconBg}`}>
+                            <span className="material-symbols-outlined text-[10px] text-white">{b.icon}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Text */}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-black text-white truncate">
+                              {t.participant_name || "Customer"}
+                            </div>
+                            <div className="text-xs text-white/50 truncate">
+                              {t.last_message_snippet || "—"}
+                            </div>
+                          </div>
+                          <div className="text-[11px] text-white/40 shrink-0">
+                            {formatAgo(t.last_message_at)}
+                          </div>
+                        </div>
+
+                        <div className="mt-2 flex items-center justify-between">
+                          <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${statusPill(t.status)}`}>
+                            {String(t.status || "open")}
+                          </span>
+                          {Number(t.unread_count || 0) > 0 ? (
+                            <div className="size-2 rounded-full bg-primary animate-pulse" />
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+
+          {/* Bottom left new message */}
+          <div className="shrink-0 p-4">
             <button
               disabled
-              className="px-5 py-2.5 rounded-xl btn-primary-gradient text-background-dark text-sm font-bold opacity-40 cursor-not-allowed flex items-center gap-2 shadow-lg shadow-primary/20"
+              className="w-full py-3 rounded-2xl bg-primary text-background-dark font-black opacity-40 cursor-not-allowed flex items-center justify-center gap-2"
               title="New outbound thread needs Send API + recipient discovery"
             >
-              <span className="material-symbols-outlined text-lg">add</span>
+              <span className="material-symbols-outlined">add</span>
               New Message
             </button>
           </div>
         </div>
 
-        {/* Split */}
-        <div className="flex-1 min-h-0 px-8 pb-8 flex gap-6 overflow-hidden">
-          {/* Left */}
-          <div className="w-[35%] min-h-0 flex flex-col glass-panel rounded-2xl overflow-hidden border-glass-border">
-            <div className="p-4 border-b border-glass-border space-y-3 shrink-0">
-              <div className="relative">
-                <input
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                  className="w-full bg-background-dark/60 border-glass-border rounded-xl pl-10 pr-4 py-2 text-sm focus:ring-1 focus:ring-primary focus:border-primary placeholder:text-white/30"
-                  placeholder="Search conversations..."
-                  type="text"
-                  disabled={!workspaceId}
-                />
-                <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-white/40">
-                  search
+        {/* Conversation panel */}
+        <div className="flex-1 min-h-0 rounded-2xl bg-white/5 border border-white/10 overflow-hidden flex flex-col">
+          {/* Header */}
+          <div className="px-6 py-4 border-b border-white/10 flex items-center justify-between shrink-0 bg-white/5">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="size-10 rounded-full bg-white/10 flex items-center justify-center shrink-0">
+                <span className="text-white/80 font-black">
+                  {activeThread ? (activeThread.participant_name || "U").slice(0, 1).toUpperCase() : "—"}
                 </span>
+              </div>
+
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="text-base font-black text-white truncate">
+                    {activeThread ? activeThread.participant_name || "Customer" : "Select a conversation"}
+                  </div>
+                  {activeThread ? (
+                    <span className={`px-2 py-0.5 rounded-md text-[10px] font-black ${badge.cls}`}>
+                      SYNCED VIA {badge.label}
+                    </span>
+                  ) : (
+                    <span className="px-2 py-0.5 rounded-md text-[10px] font-black bg-white/10 text-white/40">
+                      CHANNEL
+                    </span>
+                  )}
+                </div>
+
+                <div className="text-xs text-white/40 mt-1 truncate">
+                  {activeThread
+                    ? `Account: ${String(activeThread.platform || "").toUpperCase()} — ${
+                        activeThread.channel?.external_id || activeThread.channel_id || "—"
+                      }`
+                    : "Select a thread to view messages"}
+                </div>
               </div>
             </div>
 
-            <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar">
-              {!workspaceId ? (
-                <div className="p-8 text-center text-white/40 text-sm">Select a workspace first.</div>
-              ) : threadsLoading ? (
-                <div className="p-8 text-white/50 text-sm">Loading conversations…</div>
-              ) : threads.length === 0 ? (
-                <div className="p-8 text-center text-white/40 text-sm">
-                  No conversations yet. Click <b>Sync Inbox</b> to backfill from Meta.
-                </div>
-              ) : (
-                threads.map((t) => {
-                  const isActive = String(t.id) === String(activeThreadId);
-                  const b = channelBadge(t.platform);
-
-                  return (
-                    <div
-                      key={t.id}
-                      onClick={() => setActiveThreadId(t.id)}
-                      className={[
-                        "relative group cursor-pointer transition-colors",
-                        isActive ? "bg-primary/5 active-glow border-l-4 border-primary" : "hover:bg-white/5",
-                      ].join(" ")}
-                    >
-                      <div className="p-4 border-b border-glass-border flex gap-3">
-                        <div className="relative shrink-0">
-                          <div className="size-12 rounded-full bg-white/10 flex items-center justify-center">
-                            <span className="text-white/70 font-black text-sm">
-                              {(t.participant_name || "U").slice(0, 1).toUpperCase()}
-                            </span>
-                          </div>
-
-                          <div className="absolute -bottom-1 -right-1 size-5 rounded-full bg-background-dark flex items-center justify-center p-0.5">
-                            <div className={`w-full h-full rounded-full flex items-center justify-center ${b.iconBg}`}>
-                              <span className="material-symbols-outlined text-[10px] text-white">
-                                {b.icon}
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center justify-between mb-0.5">
-                            <h4 className="text-sm font-bold text-white truncate">
-                              {t.participant_name || "Customer"}
-                            </h4>
-                            <span className="text-[10px] text-white/40">{formatAgo(t.last_message_at)}</span>
-                          </div>
-
-                          <p className="text-xs text-white/70 line-clamp-1 mb-2">{t.last_message_snippet || "—"}</p>
-
-                          <div className="flex items-center justify-between">
-                            <span
-                              className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wider ${statusPill(
-                                t.status
-                              )}`}
-                            >
-                              {String(t.status || "open")}
-                            </span>
-
-                            {Number(t.unread_count || 0) > 0 ? (
-                              <div className="size-2 rounded-full bg-primary animate-pulse" />
-                            ) : null}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
+            <div className="flex items-center gap-2">
+              <button
+                disabled
+                className="px-4 py-2 rounded-full bg-primary/20 border border-primary/30 text-primary text-xs font-black opacity-70 cursor-not-allowed"
+              >
+                Assign Agent
+              </button>
+              <button
+                disabled
+                className="px-4 py-2 rounded-full bg-primary text-background-dark text-xs font-black opacity-70 cursor-not-allowed"
+              >
+                Resolve Thread
+              </button>
             </div>
           </div>
 
-          {/* Right */}
-          <div className="w-[65%] min-h-0 flex flex-col glass-panel rounded-2xl overflow-hidden border-glass-border">
-            <div className="px-6 py-4 border-b border-glass-border flex items-center justify-between bg-white/5 shrink-0">
-              <div className="flex items-center gap-4 min-w-0">
-                <div className="size-10 rounded-full bg-white/10 flex items-center justify-center shrink-0">
-                  <span className="text-white/70 font-black">
-                    {activeThread ? (activeThread.participant_name || "U").slice(0, 1).toUpperCase() : "—"}
-                  </span>
-                </div>
-
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-base font-bold text-white leading-none truncate">
-                      {activeThread ? activeThread.participant_name || "Customer" : "Select a conversation"}
-                    </h3>
-
-                    <span
-                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                        activeThread ? badge.cls : "bg-white/10 text-white/40"
-                      }`}
-                    >
-                      {activeThread ? badge.label : "CHANNEL"}
-                    </span>
+          {/* Messages */}
+          <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-6 space-y-6 flex flex-col">
+            {!activeThread ? (
+              <div className="text-white/40 text-sm">Select a conversation from the left.</div>
+            ) : msgLoading ? (
+              <div className="text-white/40 text-sm">Loading messages…</div>
+            ) : msgErr ? (
+              <div className="text-red-200/90 text-sm whitespace-pre-wrap">{msgErr}</div>
+            ) : messages.length === 0 ? (
+              <div className="text-white/40 text-sm">No messages yet.</div>
+            ) : (
+              messages.map((m) => {
+                const inbound = String(m.direction || "").toLowerCase() === "inbound";
+                return inbound ? (
+                  <div key={m.id || makeMsgKey(m)} className="max-w-[70%]">
+                    <div className="bg-white/5 border border-white/10 rounded-2xl px-5 py-4 text-sm text-white/90 leading-relaxed">
+                      {m.text || "—"}
+                    </div>
+                    <div className="mt-2 text-[10px] text-white/30">
+                      {m.sent_at ? new Date(m.sent_at).toLocaleTimeString() : ""} • {m.sender_name || "User"}
+                    </div>
                   </div>
+                ) : (
+                  <div key={m.id || makeMsgKey(m)} className="max-w-[70%] self-end text-right">
+                    <div className="bg-primary/15 border border-primary/25 rounded-2xl px-5 py-4 text-sm text-white/90 leading-relaxed">
+                      {m.text || "—"}
+                    </div>
+                    <div className="mt-2 text-[10px] text-primary/40 flex items-center justify-end gap-1">
+                      {m.sent_at ? new Date(m.sent_at).toLocaleTimeString() : ""} • Sent{" "}
+                      <span className="material-symbols-outlined text-[12px]">done_all</span>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+            <div ref={endRef} />
+          </div>
 
-                  <p className="text-xs text-primary/70 mt-1 font-medium">
-                    {activeThread
-                      ? `Account: ${String(activeThread.platform || "").toUpperCase()} — ${
-                          activeThread.channel?.external_id || activeThread.channel_id || "—"
-                        }`
-                      : "Select a thread to view messages"}
-                  </p>
-                </div>
+          {/* Composer (matches screenshot bottom) */}
+          <div className="shrink-0 p-5 border-t border-white/10 bg-[#07191b]">
+            <div className="rounded-2xl border border-white/10 bg-white/5 overflow-hidden">
+              <div className="px-4 py-3 flex items-center gap-3 border-b border-white/10 text-white/50">
+                <button className="hover:text-white/70">
+                  <span className="material-symbols-outlined text-[18px]">format_bold</span>
+                </button>
+                <button className="hover:text-white/70">
+                  <span className="material-symbols-outlined text-[18px]">attach_file</span>
+                </button>
+                <button className="hover:text-white/70">
+                  <span className="material-symbols-outlined text-[18px]">image</span>
+                </button>
+                <span className="w-px h-5 bg-white/10" />
+                <button className="hover:text-white/70">
+                  <span className="material-symbols-outlined text-[18px]">bolt</span>
+                </button>
               </div>
 
-              <div className="flex items-center gap-2">
-                <button
-                  disabled
-                  className="px-3 py-1.5 rounded-lg bg-background-dark/60 border border-glass-border text-xs text-white/40 cursor-not-allowed flex items-center gap-2"
-                >
-                  <span className="material-symbols-outlined text-sm">person_add</span>
-                  Assign
-                </button>
-                <button
-                  disabled
-                  className="px-3 py-1.5 rounded-lg bg-primary/20 border border-primary/30 text-xs text-primary/60 font-bold cursor-not-allowed"
-                >
-                  Mark as Resolved
-                </button>
-              </div>
-            </div>
-
-            {/* Messages */}
-            <div className="flex-1 min-h-0 overflow-y-auto custom-scrollbar p-8 space-y-8 flex flex-col">
-              {!activeThread ? (
-                <div className="text-white/40 text-sm">Select a conversation from the left.</div>
-              ) : msgLoading ? (
-                <div className="text-white/40 text-sm">Loading messages…</div>
-              ) : msgErr ? (
-                <div className="text-red-200/90 text-sm whitespace-pre-wrap">{msgErr}</div>
-              ) : messages.length === 0 ? (
-                <div className="text-white/40 text-sm">No messages yet.</div>
-              ) : (
-                messages.map((m) => {
-                  const inbound = String(m.direction || "").toLowerCase() === "inbound";
-                  return inbound ? (
-                    <div key={m.id || makeMsgKey(m)} className="flex items-start gap-4 max-w-[80%]">
-                      <div className="size-8 rounded-full bg-white/10 shrink-0 flex items-center justify-center">
-                        <span className="text-white/70 font-black text-xs">
-                          {(activeThread.participant_name || "U").slice(0, 1).toUpperCase()}
-                        </span>
-                      </div>
-                      <div className="space-y-1">
-                        <div className="p-4 rounded-2xl rounded-tl-none glass-panel border-white/10 text-sm text-white/90 leading-relaxed">
-                          {m.text || "—"}
-                        </div>
-                        <div className="text-[10px] text-white/30 flex items-center gap-2">
-                          {m.sent_at ? new Date(m.sent_at).toLocaleTimeString() : ""} •{" "}
-                          {m.sender_name || "User"}
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div key={m.id || makeMsgKey(m)} className="flex items-start gap-4 max-w-[80%] self-end flex-row-reverse">
-                      <div className="size-8 rounded-full bg-primary/20 shrink-0 border border-primary/30 flex items-center justify-center">
-                        <span className="material-symbols-outlined text-primary text-sm">support_agent</span>
-                      </div>
-                      <div className="space-y-1 flex flex-col items-end">
-                        <div className="p-4 rounded-2xl rounded-tr-none bg-primary/10 border border-primary/20 text-sm text-white/90 leading-relaxed">
-                          {m.text || "—"}
-                        </div>
-                        <div className="text-[10px] text-primary/40 flex items-center gap-1">
-                          {m.sent_at ? new Date(m.sent_at).toLocaleTimeString() : ""} • Sent
-                          <span className="material-symbols-outlined text-[12px]">done_all</span>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })
-              )}
-              <div ref={endRef} />
-            </div>
-
-            {/* Composer */}
-            <div className="p-6 border-t border-glass-border bg-background-dark/80 shrink-0">
-              <div className="flex gap-4">
+              <div className="p-4 flex items-end gap-4">
                 <textarea
                   value={reply}
                   onChange={(e) => setReply(e.target.value)}
-                  className="flex-1 bg-white/5 rounded-xl px-4 py-3 text-sm text-white/80 border border-white/5 h-24 resize-none outline-none"
-                  placeholder="Select a conversation to reply..."
+                  className="flex-1 bg-transparent text-sm text-white/80 placeholder:text-white/30 outline-none resize-none h-20"
+                  placeholder="Type your response..."
                   disabled={!activeThreadId || sending}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" && !e.shiftKey) {
@@ -801,21 +862,28 @@ export default function Inbox({ theme, setTheme }) {
                     }
                   }}
                 />
+
                 <button
                   onClick={sendReply}
                   disabled={!activeThreadId || !reply.trim() || sending}
-                  className="size-12 rounded-xl bg-primary/20 border border-primary/30 flex items-center justify-center text-primary disabled:opacity-40"
-                  title="Send"
+                  className="px-6 py-3 rounded-full bg-primary text-background-dark font-black disabled:opacity-40"
                 >
-                  <span className="material-symbols-outlined">send</span>
+                  Send Message →
                 </button>
               </div>
 
-              <div className="mt-2 text-xs text-white/30">Enter to send • Shift+Enter for new line</div>
+              <div className="px-4 pb-3 text-[11px] text-white/30 flex items-center justify-between">
+                <span>Enter to send • Shift+Enter for new line</span>
+                <span className="flex items-center gap-2">
+                  <span className="size-2 rounded-full bg-primary/70" />
+                  Syncing with Facebook...
+                </span>
+              </div>
             </div>
           </div>
         </div>
       </div>
-    </AppShell>
-  );
+    </div>
+  </AppShell>
+);
 }

@@ -63,6 +63,10 @@ const T_OTP = "password_reset_otps";
 const T_WORKSPACES = "workspaces";
 const T_WSM = "workspace_members";
 
+// Publisher
+const T_SOCIAL_POSTS = "social_posts";
+const T_SOCIAL_POST_TARGETS = "social_post_targets";
+
 // Connections
 const T_CHANNELS = "workspace_channels";
 const T_CHANNEL_TOKENS = "channel_tokens";
@@ -76,7 +80,6 @@ const CHANNEL_STATUS_DISCONNECTED =
 /* ===================== INBOX MEMORY STORE (NO DB) ===================== */
 /**
  * inboxStore: Map<workspaceId, { threads: Map<threadId, thread>, messages: Map<threadId, Map<msgKey, msg>> }>
- * threadId is stable: `${provider}:${platform}:${channelExternalId}:${externalThreadIdOrParticipant}`
  */
 const inboxStore = new Map();
 
@@ -84,7 +87,11 @@ function getWsStore(workspaceId) {
   const ws = String(workspaceId || "");
   if (!ws) return null;
   if (!inboxStore.has(ws)) {
-    inboxStore.set(ws, { threads: new Map(), messages: new Map(), updatedAt: Date.now() });
+    inboxStore.set(ws, {
+      threads: new Map(),
+      messages: new Map(),
+      updatedAt: Date.now(),
+    });
   }
   return inboxStore.get(ws);
 }
@@ -146,7 +153,6 @@ function listMessagesFromMemory(workspaceId, threadId) {
 const sseClientsByWorkspace = new Map(); // Map<wsId, Set<res>>
 
 function sseWrite(res, eventName, data) {
-  // SSE event format
   res.write(`event: ${eventName}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
 }
@@ -174,7 +180,7 @@ function emitToWorkspace(workspaceId, eventName, payload) {
     try {
       sseWrite(res, eventName, payload);
     } catch {
-      // ignore
+      // ignore broken client
     }
   }
 }
@@ -445,6 +451,27 @@ async function requireWorkspaceAccess(req, res, next) {
   } catch (e) {
     next(e);
   }
+}
+async function getChannelById({ workspaceId, channelId }) {
+  const { data, error } = await supabase
+    .from(T_CHANNELS)
+    .select("id,workspace_id,provider,platform,external_id,display_name,meta,status")
+    .eq("workspace_id", workspaceId)
+    .eq("id", channelId)
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+async function metaGet(url) {
+  const r = await fetch(url);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const e = new Error(j?.error?.message || "Meta request failed");
+    e.meta = j?.error || j;
+    throw e;
+  }
+  return j;
 }
 
 /* ================= META HELPERS ================= */
@@ -877,7 +904,6 @@ async function upsertInboundThreadAndMessageMemory({
     meta: rawMeta || {},
   });
 
-  // emit realtime
   emitToWorkspace(workspaceId, "thread_upsert", thread);
   emitToWorkspace(workspaceId, "message_upsert", msg);
 
@@ -886,10 +912,12 @@ async function upsertInboundThreadAndMessageMemory({
 
 /* ---------------- App ---------------- */
 const app = express();
+app.set("trust proxy", 1);
 
 app.use(
   cors({
     origin: (origin, cb) => {
+      // allow same-origin / server-side / Postman
       if (!origin) return cb(null, true);
       if (CORS_ORIGINS.includes(origin)) return cb(null, true);
       return cb(new Error(`CORS blocked for origin: ${origin}`));
@@ -922,9 +950,564 @@ app.get("/api/health", (req, res) =>
     meta_graph: META_GRAPH_VERSION,
     meta_webhook: !!META_VERIFY_TOKEN,
     inbox_storage: "memory+sse",
+    publisher: true,
   })
 );
 
+/* ============================================================
+   FEEDS APIs (READ-ONLY)
+   ============================================================ */
+
+// Facebook Page feed
+app.get(
+  "/api/workspaces/:workspaceId/feeds/facebook",
+  requireAuth,
+  requireWorkspaceAccess,
+  async (req, res, next) => {
+    try {
+      const { workspaceId } = req.params;
+      const provider = providerMeta();
+
+      const page_channel_id = String(req.query.page_channel_id || "");
+      const limit = Math.min(50, Math.max(1, Number(req.query.limit || 25)));
+      const after = String(req.query.after || "");
+
+      if (!page_channel_id) {
+        return res.status(400).json({
+          error: "VALIDATION_ERROR",
+          message: "page_channel_id is required",
+        });
+      }
+
+      const ch = await getChannelById({ workspaceId, channelId: page_channel_id });
+      if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
+
+      if (ch.provider !== provider || ch.platform !== "facebook" || ch.status !== CHANNEL_STATUS_CONNECTED) {
+        return res.status(400).json({
+          error: "INVALID_CHANNEL",
+          message: "Not a connected Facebook channel",
+        });
+      }
+
+      const pageId = String(ch.external_id);
+      const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
+      if (!pageToken) return res.status(400).json({ error: "MISSING_TOKEN", message: "Missing page token" });
+
+      const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/feed`);
+      url.searchParams.set(
+        "fields",
+        [
+          "id",
+          "message",
+          "story",
+          "created_time",
+          "permalink_url",
+          "full_picture",
+          "attachments{media_type,media,url,title,description}",
+          "likes.summary(true).limit(0)",
+          "comments.summary(true).limit(5){id,message,from,created_time,comment_count}",
+        ].join(",")
+      );
+      url.searchParams.set("limit", String(limit));
+      if (after) url.searchParams.set("after", after);
+      url.searchParams.set("access_token", pageToken);
+
+      const j = await metaGet(url.toString());
+      return res.json({
+        ok: true,
+        channel: { id: ch.id, display_name: ch.display_name, external_id: pageId },
+        data: j?.data || [],
+        paging: j?.paging || null,
+      });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+// Instagram media feed (IG Graph API)
+app.get(
+  "/api/workspaces/:workspaceId/feeds/instagram",
+  requireAuth,
+  requireWorkspaceAccess,
+  async (req, res, next) => {
+    try {
+      const { workspaceId } = req.params;
+      const provider = providerMeta();
+
+      const ig_channel_id = String(req.query.ig_channel_id || "");
+      const limit = Math.min(50, Math.max(1, Number(req.query.limit || 25)));
+      const after = String(req.query.after || "");
+
+      if (!ig_channel_id) {
+        return res.status(400).json({
+          error: "VALIDATION_ERROR",
+          message: "ig_channel_id is required",
+        });
+      }
+
+      const ch = await getChannelById({ workspaceId, channelId: ig_channel_id });
+      if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
+
+      if (ch.provider !== provider || ch.platform !== "instagram" || ch.status !== CHANNEL_STATUS_CONNECTED) {
+        return res.status(400).json({
+          error: "INVALID_CHANNEL",
+          message: "Not a connected Instagram channel",
+        });
+      }
+
+      const igUserId = String(ch.external_id);
+
+      // You are storing token under external_id=igUserId token_type=page (page token)
+      const token = await getTokenFromDB({
+        workspaceId,
+        externalId: igUserId,
+        token_type: "page",
+      });
+
+      if (!token) return res.status(400).json({ error: "MISSING_TOKEN", message: "Missing IG token" });
+
+      const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media`);
+      url.searchParams.set(
+        "fields",
+        [
+          "id",
+          "caption",
+          "media_type",
+          "media_url",
+          "thumbnail_url",
+          "permalink",
+          "timestamp",
+          "username",
+          "like_count",
+          "comments_count",
+        ].join(",")
+      );
+      url.searchParams.set("limit", String(limit));
+      if (after) url.searchParams.set("after", after);
+      url.searchParams.set("access_token", token);
+
+      const j = await metaGet(url.toString());
+      return res.json({
+        ok: true,
+        channel: { id: ch.id, display_name: ch.display_name, external_id: igUserId },
+        data: j?.data || [],
+        paging: j?.paging || null,
+      });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+
+/* ============================================================
+   FEEDS APIs
+   ============================================================ */
+
+async function metaPostForm(url, formObj) {
+  const body = new URLSearchParams();
+  for (const [k, v] of Object.entries(formObj || {})) {
+    if (v === undefined || v === null) continue;
+    body.set(k, String(v));
+  }
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const e = new Error(j?.error?.message || "Meta POST failed");
+    e.meta = j?.error || j;
+    throw e;
+  }
+  return j;
+}
+
+/* ---------------- Facebook Page feed ---------------- */
+app.get(
+  "/api/workspaces/:workspaceId/feeds/facebook",
+  requireAuth,
+  requireWorkspaceAccess,
+  async (req, res, next) => {
+    try {
+      const { workspaceId } = req.params;
+      const provider = providerMeta();
+
+      const page_channel_id = String(req.query.page_channel_id || "");
+      const limit = Math.min(50, Math.max(1, Number(req.query.limit || 25)));
+      const after = String(req.query.after || "");
+
+      if (!page_channel_id) {
+        return res.status(400).json({
+          error: "VALIDATION_ERROR",
+          message: "page_channel_id is required",
+        });
+      }
+
+      const ch = await getChannelById({ workspaceId, channelId: page_channel_id });
+      if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
+
+      if (
+        ch.provider !== provider ||
+        ch.platform !== "facebook" ||
+        ch.status !== CHANNEL_STATUS_CONNECTED
+      ) {
+        return res.status(400).json({
+          error: "INVALID_CHANNEL",
+          message: "Not a connected Facebook channel",
+        });
+      }
+
+      const pageId = String(ch.external_id);
+      const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
+      if (!pageToken)
+        return res.status(400).json({ error: "MISSING_TOKEN", message: "Missing page token" });
+
+      const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/feed`);
+      url.searchParams.set(
+        "fields",
+        [
+          "id",
+          "message",
+          "story",
+          "created_time",
+          "permalink_url",
+          "full_picture",
+          "attachments{media_type,media,url,title,description}",
+          "likes.summary(true).limit(0)",
+          "comments.summary(true).limit(5){id,message,from,created_time,comment_count}",
+        ].join(",")
+      );
+      url.searchParams.set("limit", String(limit));
+      if (after) url.searchParams.set("after", after);
+      url.searchParams.set("access_token", pageToken);
+
+      const j = await metaGet(url.toString());
+      return res.json({
+        ok: true,
+        channel: { id: ch.id, display_name: ch.display_name, external_id: pageId },
+        data: j?.data || [],
+        paging: j?.paging || null,
+      });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+/* ---------------- Facebook: Fetch comments for a post ----------------
+   GET /feeds/facebook/comments?page_channel_id=...&post_id=...&limit=50&after=...
+*/
+app.get(
+  "/api/workspaces/:workspaceId/feeds/facebook/comments",
+  requireAuth,
+  requireWorkspaceAccess,
+  async (req, res, next) => {
+    try {
+      const { workspaceId } = req.params;
+      const provider = providerMeta();
+
+      const page_channel_id = String(req.query.page_channel_id || "");
+      const post_id = String(req.query.post_id || "");
+      const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
+      const after = String(req.query.after || "");
+
+      if (!page_channel_id) {
+        return res.status(400).json({ error: "VALIDATION_ERROR", message: "page_channel_id is required" });
+      }
+      if (!post_id) {
+        return res.status(400).json({ error: "VALIDATION_ERROR", message: "post_id is required" });
+      }
+
+      const ch = await getChannelById({ workspaceId, channelId: page_channel_id });
+      if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
+
+      if (
+        ch.provider !== provider ||
+        ch.platform !== "facebook" ||
+        ch.status !== CHANNEL_STATUS_CONNECTED
+      ) {
+        return res.status(400).json({ error: "INVALID_CHANNEL", message: "Not a connected Facebook channel" });
+      }
+
+      const pageId = String(ch.external_id);
+      const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
+      if (!pageToken) return res.status(400).json({ error: "MISSING_TOKEN", message: "Missing page token" });
+
+      const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/${post_id}/comments`);
+      url.searchParams.set(
+        "fields",
+        [
+          "id",
+          "message",
+          "from",
+          "created_time",
+          "comment_count",
+          "like_count",
+          "user_likes",
+          "parent",
+        ].join(",")
+      );
+      url.searchParams.set("limit", String(limit));
+      if (after) url.searchParams.set("after", after);
+      url.searchParams.set("access_token", pageToken);
+
+      const j = await metaGet(url.toString());
+      return res.json({
+        ok: true,
+        post_id,
+        data: j?.data || [],
+        paging: j?.paging || null,
+      });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+/* ---------------- Facebook: Reply to a comment ----------------
+   POST /feeds/facebook/comments/reply
+   body: { page_channel_id, comment_id, message }
+*/
+app.post(
+  "/api/workspaces/:workspaceId/feeds/facebook/comments/reply",
+  requireAuth,
+  requireWorkspaceAccess,
+  async (req, res, next) => {
+    try {
+      const { workspaceId } = req.params;
+      const provider = providerMeta();
+
+      const page_channel_id = String(req.body?.page_channel_id || "");
+      const comment_id = String(req.body?.comment_id || "");
+      const message = String(req.body?.message || "").trim();
+
+      if (!page_channel_id) {
+        return res.status(400).json({ error: "VALIDATION_ERROR", message: "page_channel_id is required" });
+      }
+      if (!comment_id) {
+        return res.status(400).json({ error: "VALIDATION_ERROR", message: "comment_id is required" });
+      }
+      if (!message) {
+        return res.status(400).json({ error: "VALIDATION_ERROR", message: "message is required" });
+      }
+
+      const ch = await getChannelById({ workspaceId, channelId: page_channel_id });
+      if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
+
+      if (
+        ch.provider !== provider ||
+        ch.platform !== "facebook" ||
+        ch.status !== CHANNEL_STATUS_CONNECTED
+      ) {
+        return res.status(400).json({ error: "INVALID_CHANNEL", message: "Not a connected Facebook channel" });
+      }
+
+      const pageId = String(ch.external_id);
+      const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
+      if (!pageToken) return res.status(400).json({ error: "MISSING_TOKEN", message: "Missing page token" });
+
+      const url = `https://graph.facebook.com/${META_GRAPH_VERSION}/${comment_id}/comments`;
+
+      const j = await metaPostForm(url, {
+        access_token: pageToken,
+        message,
+      });
+
+      return res.json({ ok: true, result: j });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+/* ---------------- Facebook: Like a post ----------------
+   POST /feeds/facebook/like
+   body: { page_channel_id, post_id }
+*/
+app.post(
+  "/api/workspaces/:workspaceId/feeds/facebook/like",
+  requireAuth,
+  requireWorkspaceAccess,
+  async (req, res, next) => {
+    try {
+      const { workspaceId } = req.params;
+      const provider = providerMeta();
+
+      const page_channel_id = String(req.body?.page_channel_id || "");
+      const post_id = String(req.body?.post_id || "");
+
+      if (!page_channel_id) {
+        return res.status(400).json({ error: "VALIDATION_ERROR", message: "page_channel_id is required" });
+      }
+      if (!post_id) {
+        return res.status(400).json({ error: "VALIDATION_ERROR", message: "post_id is required" });
+      }
+
+      const ch = await getChannelById({ workspaceId, channelId: page_channel_id });
+      if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
+
+      if (
+        ch.provider !== provider ||
+        ch.platform !== "facebook" ||
+        ch.status !== CHANNEL_STATUS_CONNECTED
+      ) {
+        return res.status(400).json({ error: "INVALID_CHANNEL", message: "Not a connected Facebook channel" });
+      }
+
+      const pageId = String(ch.external_id);
+      const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
+      if (!pageToken) return res.status(400).json({ error: "MISSING_TOKEN", message: "Missing page token" });
+
+      const url = `https://graph.facebook.com/${META_GRAPH_VERSION}/${post_id}/likes`;
+
+      const j = await metaPostForm(url, { access_token: pageToken });
+      return res.json({ ok: true, result: j });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+/* ---------------- Facebook: Comment on a post ----------------
+   POST /feeds/facebook/comment
+   body: { page_channel_id, post_id, message }
+*/
+app.post(
+  "/api/workspaces/:workspaceId/feeds/facebook/comment",
+  requireAuth,
+  requireWorkspaceAccess,
+  async (req, res, next) => {
+    try {
+      const { workspaceId } = req.params;
+      const provider = providerMeta();
+
+      const page_channel_id = String(req.body?.page_channel_id || "");
+      const post_id = String(req.body?.post_id || "");
+      const message = String(req.body?.message || "").trim();
+
+      if (!page_channel_id) {
+        return res.status(400).json({ error: "VALIDATION_ERROR", message: "page_channel_id is required" });
+      }
+      if (!post_id) {
+        return res.status(400).json({ error: "VALIDATION_ERROR", message: "post_id is required" });
+      }
+      if (!message) {
+        return res.status(400).json({ error: "VALIDATION_ERROR", message: "message is required" });
+      }
+
+      const ch = await getChannelById({ workspaceId, channelId: page_channel_id });
+      if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
+
+      if (
+        ch.provider !== provider ||
+        ch.platform !== "facebook" ||
+        ch.status !== CHANNEL_STATUS_CONNECTED
+      ) {
+        return res.status(400).json({ error: "INVALID_CHANNEL", message: "Not a connected Facebook channel" });
+      }
+
+      const pageId = String(ch.external_id);
+      const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
+      if (!pageToken) return res.status(400).json({ error: "MISSING_TOKEN", message: "Missing page token" });
+
+      const url = `https://graph.facebook.com/${META_GRAPH_VERSION}/${post_id}/comments`;
+
+      const j = await metaPostForm(url, {
+        access_token: pageToken,
+        message,
+      });
+
+      return res.json({ ok: true, result: j });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+/* ---------------- Instagram media feed ---------------- */
+app.get(
+  "/api/workspaces/:workspaceId/feeds/instagram",
+  requireAuth,
+  requireWorkspaceAccess,
+  async (req, res, next) => {
+    try {
+      const { workspaceId } = req.params;
+      const provider = providerMeta();
+
+      const ig_channel_id = String(req.query.ig_channel_id || "");
+      const limit = Math.min(50, Math.max(1, Number(req.query.limit || 25)));
+      const after = String(req.query.after || "");
+
+      if (!ig_channel_id) {
+        return res.status(400).json({
+          error: "VALIDATION_ERROR",
+          message: "ig_channel_id is required",
+        });
+      }
+
+      const ch = await getChannelById({ workspaceId, channelId: ig_channel_id });
+      if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
+
+      if (
+        ch.provider !== provider ||
+        ch.platform !== "instagram" ||
+        ch.status !== CHANNEL_STATUS_CONNECTED
+      ) {
+        return res.status(400).json({
+          error: "INVALID_CHANNEL",
+          message: "Not a connected Instagram channel",
+        });
+      }
+
+      const igUserId = String(ch.external_id);
+
+      // stored under external_id=igUserId token_type=page
+      const token = await getTokenFromDB({
+        workspaceId,
+        externalId: igUserId,
+        token_type: "page",
+      });
+
+      if (!token)
+        return res.status(400).json({ error: "MISSING_TOKEN", message: "Missing IG token" });
+
+      const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media`);
+      url.searchParams.set(
+        "fields",
+        [
+          "id",
+          "caption",
+          "media_type",
+          "media_url",
+          "thumbnail_url",
+          "permalink",
+          "timestamp",
+          "username",
+          "like_count",
+          "comments_count",
+        ].join(",")
+      );
+      url.searchParams.set("limit", String(limit));
+      if (after) url.searchParams.set("after", after);
+      url.searchParams.set("access_token", token);
+
+      const j = await metaGet(url.toString());
+      return res.json({
+        ok: true,
+        channel: { id: ch.id, display_name: ch.display_name, external_id: igUserId },
+        data: j?.data || [],
+        paging: j?.paging || null,
+      });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
 /* ============================================================
    META WEBHOOK
    ============================================================ */
@@ -935,20 +1518,16 @@ function handleMetaWebhookGet(req, res) {
     const token = String(req.query["hub.verify_token"] || "");
     const challenge = String(req.query["hub.challenge"] || "");
 
-    if (
-      mode === "subscribe" &&
-      token &&
-      META_VERIFY_TOKEN &&
-      token === META_VERIFY_TOKEN
-    ) {
+    if (mode === "subscribe" && token && META_VERIFY_TOKEN && token === META_VERIFY_TOKEN) {
       console.log("META WEBHOOK VERIFIED");
       return res.status(200).send(challenge);
     }
     return res.status(403).json({ error: "WEBHOOK_VERIFY_FAILED" });
   } catch (e) {
-    return res
-      .status(500)
-      .json({ error: "SERVER_ERROR", message: e?.message || "Webhook verify failed" });
+    return res.status(500).json({
+      error: "SERVER_ERROR",
+      message: e?.message || "Webhook verify failed",
+    });
   }
 }
 
@@ -963,9 +1542,14 @@ async function handleMetaWebhookPost(req, res) {
       return res.status(401).json({ error: "INVALID_SIGNATURE" });
     }
 
-    const payload = JSON.parse(rawBody.toString("utf8") || "{}");
-    const provider = providerMeta();
+    let payload = {};
+    try {
+      payload = JSON.parse(rawBody.toString("utf8") || "{}");
+    } catch {
+      payload = {};
+    }
 
+    const provider = providerMeta();
     const objectType = String(payload?.object || "").toLowerCase();
     const entries = Array.isArray(payload?.entry) ? payload.entry : [];
 
@@ -974,9 +1558,11 @@ async function handleMetaWebhookPost(req, res) {
     const errors = [];
 
     function extractMessagingEvents(entry) {
+      // page webhooks usually have entry.messaging[]
       const m = Array.isArray(entry?.messaging) ? entry.messaging : [];
       if (m.length) return m;
 
+      // IG webhooks often have entry.changes[]
       const changes = Array.isArray(entry?.changes) ? entry.changes : [];
       const out = [];
 
@@ -1000,6 +1586,7 @@ async function handleMetaWebhookPost(req, res) {
         continue;
       }
 
+      // object can be "page" or "instagram"
       const platform = objectType === "instagram" ? "instagram" : "facebook";
 
       const channel = await findChannelByExternalId({
@@ -1009,6 +1596,7 @@ async function handleMetaWebhookPost(req, res) {
       });
 
       if (!channel) {
+        // if you see ignored++ increasing, it means your channel external_id doesn't match webhook entry.id
         ignored += 1;
         continue;
       }
@@ -1077,6 +1665,7 @@ async function handleMetaWebhookPost(req, res) {
     return res.status(200).json({ ok: true, processed, ignored, errors });
   } catch (e) {
     console.error("META WEBHOOK ERROR:", e?.message || e);
+    // Meta expects 200 quickly
     return res.status(200).json({ ok: false, error: "WEBHOOK_HANDLER_FAILED" });
   }
 }
@@ -1094,9 +1683,10 @@ app.post("/api/auth/login", async (req, res, next) => {
     const email = safeEmail(req.body?.email);
     const password = String(req.body?.password || "");
     if (!email || !password) {
-      return res
-        .status(400)
-        .json({ error: "VALIDATION_ERROR", message: "Email and password required." });
+      return res.status(400).json({
+        error: "VALIDATION_ERROR",
+        message: "Email and password required.",
+      });
     }
     const user = await getUserByEmail(email);
     if (!user) return res.status(401).json({ error: "INVALID_CREDENTIALS" });
@@ -1205,7 +1795,11 @@ app.post("/api/auth/verify-email", async (req, res, next) => {
     }
 
     await clearOtp(user.id);
-    const reset_token = signReset({ sub: user.id, email: user.email, purpose: "password_reset" });
+    const reset_token = signReset({
+      sub: user.id,
+      email: user.email,
+      purpose: "password_reset",
+    });
     return res.json({ reset_token });
   } catch (e) {
     next(e);
@@ -1268,7 +1862,9 @@ app.get("/api/workspaces", requireAuth, async (req, res, next) => {
 
     const { data, error } = await supabase
       .from(T_WSM)
-      .select("role, workspaces:workspace_id ( id, name, description, plan, created_at, created_by )")
+      .select(
+        "role, workspaces:workspace_id ( id, name, description, plan, created_at, created_by )"
+      )
       .eq("user_id", req.auth.userId)
       .eq("status", "active")
       .order("joined_at", { ascending: false });
@@ -1327,7 +1923,10 @@ app.post(
       const { workspaceId, channelId } = req.params;
       const { error } = await supabase
         .from(T_CHANNELS)
-        .update({ status: CHANNEL_STATUS_DISCONNECTED, updated_at: new Date().toISOString() })
+        .update({
+          status: CHANNEL_STATUS_DISCONNECTED,
+          updated_at: new Date().toISOString(),
+        })
         .eq("workspace_id", workspaceId)
         .eq("id", channelId);
       if (error) throw error;
@@ -1346,7 +1945,10 @@ app.post("/api/meta/exchange", requireAuth, async (req, res, next) => {
     const code = String(req.body?.code || "");
     const workspaceId = String(req.body?.workspaceId || "");
     if (!code || !workspaceId) {
-      return res.status(400).json({ error: "VALIDATION_ERROR", message: "code and workspaceId required" });
+      return res.status(400).json({
+        error: "VALIDATION_ERROR",
+        message: "code and workspaceId required",
+      });
     }
 
     if (!isGlobalAdmin(req.auth.role)) {
@@ -1359,11 +1961,7 @@ app.post("/api/meta/exchange", requireAuth, async (req, res, next) => {
     const pages = await fetchMetaPages({ userAccessToken });
 
     const normalized = (pages || []).map((p) => {
-      const ig =
-        p.instagram_business_account ||
-        p.connected_instagram_account ||
-        null;
-
+      const ig = p.instagram_business_account || p.connected_instagram_account || null;
       return {
         pageId: String(p.id),
         pageName: String(p.name || "Facebook Page"),
@@ -1493,7 +2091,9 @@ app.post("/api/meta/connect-pages", requireAuth, async (req, res, next) => {
     }
 
     if (!channelRows.length) {
-      return res.status(400).json({ error: "VALIDATION_ERROR", message: "No selections to connect" });
+      return res
+        .status(400)
+        .json({ error: "VALIDATION_ERROR", message: "No selections to connect" });
     }
 
     const { error: chErr } = await supabase.from(T_CHANNELS).upsert(channelRows, {
@@ -1519,6 +2119,430 @@ app.post("/api/meta/connect-pages", requireAuth, async (req, res, next) => {
 });
 
 /* ============================================================
+   PUBLISHER HELPERS (META)
+   ============================================================ */
+
+async function publishFacebookPost({ pageId, pageToken, message, link }) {
+  const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/feed`);
+
+  const body = new URLSearchParams();
+  body.set("access_token", pageToken);
+  if (message) body.set("message", message);
+  if (link) body.set("link", link);
+
+  const r = await fetch(url.toString(), {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const e = new Error(j?.error?.message || "Facebook publish failed");
+    e.meta = j?.error || j;
+    throw e;
+  }
+  return j;
+}
+
+async function publishInstagramPost({ igUserId, token, caption, imageUrl }) {
+  if (!imageUrl) throw new Error("Instagram publishing requires imageUrl (feed posts can't be text-only).");
+
+  const createUrl = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media`);
+  createUrl.searchParams.set("access_token", token);
+
+  const createBody = { image_url: imageUrl, caption: caption || "" };
+
+  const r1 = await fetch(createUrl.toString(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(createBody),
+  });
+
+  const j1 = await r1.json().catch(() => ({}));
+  if (!r1.ok) {
+    const e = new Error(j1?.error?.message || "IG create media failed");
+    e.meta = j1?.error || j1;
+    throw e;
+  }
+
+  const creationId = j1?.id;
+  if (!creationId) throw new Error("IG create media returned no id.");
+
+  const pubUrl = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media_publish`);
+  pubUrl.searchParams.set("access_token", token);
+
+  const r2 = await fetch(pubUrl.toString(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ creation_id: creationId }),
+  });
+
+  const j2 = await r2.json().catch(() => ({}));
+  if (!r2.ok) {
+    const e = new Error(j2?.error?.message || "IG publish failed");
+    e.meta = j2?.error || j2;
+    throw e;
+  }
+
+  return { creation_id: creationId, ...j2 };
+}
+
+/* ============================================================
+   PUBLISHER APIs
+   ============================================================ */
+
+app.get(
+  "/api/workspaces/:workspaceId/publisher/channels",
+  requireAuth,
+  requireWorkspaceAccess,
+  async (req, res, next) => {
+    try {
+      const { workspaceId } = req.params;
+      const provider = String(req.query.provider || "meta");
+
+      const { data, error } = await supabase
+        .from(T_CHANNELS)
+        .select("id,provider,platform,display_name,external_id,status,meta,updated_at")
+        .eq("workspace_id", workspaceId)
+        .eq("provider", provider)
+        .eq("status", CHANNEL_STATUS_CONNECTED)
+        .order("updated_at", { ascending: false });
+
+      if (error) throw error;
+
+      const channels = (data || []).map((c) => ({
+        ...c,
+        capabilities:
+          c.platform === "facebook"
+            ? { text: true, link: true, image: true }
+            : c.platform === "instagram"
+            ? { text: false, link: false, image: true }
+            : { text: false, link: false, image: false },
+      }));
+
+      res.json({ channels });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+app.post(
+  "/api/workspaces/:workspaceId/publisher/posts",
+  requireAuth,
+  requireWorkspaceAccess,
+  async (req, res, next) => {
+    try {
+      const { workspaceId } = req.params;
+
+      const content_type = String(req.body?.content_type || "text");
+      const text = String(req.body?.text || "");
+      const link_url = String(req.body?.link_url || "");
+      const media_urls = Array.isArray(req.body?.media_urls) ? req.body.media_urls : [];
+      const selected_channel_ids = Array.isArray(req.body?.channel_ids) ? req.body.channel_ids : [];
+
+      const action = String(req.body?.action || "draft"); // draft | scheduled | publish_now
+      const scheduled_at = req.body?.scheduled_at
+        ? new Date(req.body.scheduled_at).toISOString()
+        : null;
+
+      if (!selected_channel_ids.length) {
+        return res.status(400).json({
+          error: "VALIDATION_ERROR",
+          message: "Select at least one channel.",
+        });
+      }
+
+      if (!text && !link_url && !media_urls.length) {
+        return res.status(400).json({
+          error: "VALIDATION_ERROR",
+          message: "Post content is empty.",
+        });
+      }
+
+      let status = "draft";
+      if (action === "scheduled") {
+        if (!scheduled_at) {
+          return res.status(400).json({
+            error: "VALIDATION_ERROR",
+            message: "scheduled_at required.",
+          });
+        }
+        status = "scheduled";
+      }
+      if (action === "publish_now") status = "publishing";
+
+      const { data: postRow, error: postErr } = await supabase
+        .from(T_SOCIAL_POSTS)
+        .insert([
+          {
+            workspace_id: workspaceId,
+            created_by: req.auth.userId,
+            status,
+            content_type,
+            text,
+            link_url,
+            media_urls,
+            scheduled_at,
+            meta: { ui: { action } },
+          },
+        ])
+        .select("*")
+        .maybeSingle();
+
+      if (postErr) throw postErr;
+
+      const { data: chans, error: chErr } = await supabase
+        .from(T_CHANNELS)
+        .select("id,workspace_id,provider,platform,external_id,display_name,meta,status")
+        .eq("workspace_id", workspaceId)
+        .in("id", selected_channel_ids);
+
+      if (chErr) throw chErr;
+
+      const targetRows = (chans || []).map((c) => ({
+        post_id: postRow.id,
+        workspace_id: workspaceId,
+        channel_id: c.id,
+        provider: c.provider,
+        platform: c.platform,
+        external_id: c.external_id,
+        status: action === "publish_now" ? "publishing" : "queued",
+        meta: { channel_name: c.display_name },
+      }));
+
+      const { error: tErr } = await supabase.from(T_SOCIAL_POST_TARGETS).insert(targetRows);
+      if (tErr) throw tErr;
+
+      if (action === "publish_now") {
+        const result = await publishPostNow({ workspaceId, postId: postRow.id });
+        return res.json({ ok: true, post: result.post, targets: result.targets });
+      }
+
+      return res.json({ ok: true, post: postRow });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+app.get(
+  "/api/workspaces/:workspaceId/publisher/posts/drafts",
+  requireAuth,
+  requireWorkspaceAccess,
+  async (req, res, next) => {
+    try {
+      const { workspaceId } = req.params;
+      const { data, error } = await supabase
+        .from(T_SOCIAL_POSTS)
+        .select("*")
+        .eq("workspace_id", workspaceId)
+        .eq("status", "draft")
+        .order("created_at", { ascending: false })
+        .limit(50);
+      if (error) throw error;
+      res.json({ posts: data || [] });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+app.get(
+  "/api/workspaces/:workspaceId/publisher/posts/scheduled",
+  requireAuth,
+  requireWorkspaceAccess,
+  async (req, res, next) => {
+    try {
+      const { workspaceId } = req.params;
+      const { data, error } = await supabase
+        .from(T_SOCIAL_POSTS)
+        .select("*")
+        .eq("workspace_id", workspaceId)
+        .eq("status", "scheduled")
+        .order("scheduled_at", { ascending: true })
+        .limit(50);
+      if (error) throw error;
+      res.json({ posts: data || [] });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+app.post(
+  "/api/workspaces/:workspaceId/publisher/posts/:postId/publish",
+  requireAuth,
+  requireWorkspaceAccess,
+  async (req, res, next) => {
+    try {
+      const { workspaceId, postId } = req.params;
+      const result = await publishPostNow({ workspaceId, postId });
+      res.json({ ok: true, post: result.post, targets: result.targets });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+/* ---------------- Publisher publish engine ---------------- */
+
+async function publishPostNow({ workspaceId, postId }) {
+  const { data: post, error: pErr } = await supabase
+    .from(T_SOCIAL_POSTS)
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .eq("id", postId)
+    .maybeSingle();
+  if (pErr) throw pErr;
+  if (!post) throw new Error("POST_NOT_FOUND");
+
+  await supabase
+    .from(T_SOCIAL_POSTS)
+    .update({ status: "publishing", error: null })
+    .eq("id", postId)
+    .eq("workspace_id", workspaceId);
+
+  const { data: targets, error: tErr } = await supabase
+    .from(T_SOCIAL_POST_TARGETS)
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .eq("post_id", postId);
+
+  if (tErr) throw tErr;
+
+  const updates = [];
+  let anyFailed = false;
+
+  for (const t of targets || []) {
+    try {
+      await supabase
+        .from(T_SOCIAL_POST_TARGETS)
+        .update({ status: "publishing", error: null })
+        .eq("id", t.id);
+
+      const token = await getTokenFromDB({
+        workspaceId,
+        externalId: String(t.external_id),
+        token_type: "page",
+      });
+
+      if (!token) throw new Error(`Missing token for ${t.platform}:${t.external_id}`);
+
+      if (t.provider === "meta" && t.platform === "facebook") {
+        const message = String(post.text || "");
+        const link = post.link_url ? String(post.link_url) : "";
+        const r = await publishFacebookPost({
+          pageId: String(t.external_id),
+          pageToken: token,
+          message,
+          link,
+        });
+
+        updates.push(
+          supabase
+            .from(T_SOCIAL_POST_TARGETS)
+            .update({
+              status: "published",
+              published_id: String(r?.id || ""),
+              meta: { ...(t.meta || {}), result: r },
+            })
+            .eq("id", t.id)
+        );
+      } else if (t.provider === "meta" && t.platform === "instagram") {
+        const caption = String(post.text || "");
+        const mediaUrls = Array.isArray(post.media_urls) ? post.media_urls : [];
+        const imageUrl = mediaUrls[0] ? String(mediaUrls[0]) : "";
+
+        const r = await publishInstagramPost({
+          igUserId: String(t.external_id),
+          token,
+          caption,
+          imageUrl,
+        });
+
+        updates.push(
+          supabase
+            .from(T_SOCIAL_POST_TARGETS)
+            .update({
+              status: "published",
+              published_id: String(r?.id || ""),
+              meta: { ...(t.meta || {}), result: r },
+            })
+            .eq("id", t.id)
+        );
+      } else {
+        throw new Error(`Unsupported target: ${t.provider}:${t.platform}`);
+      }
+    } catch (e) {
+      anyFailed = true;
+      updates.push(
+        supabase
+          .from(T_SOCIAL_POST_TARGETS)
+          .update({
+            status: "failed",
+            error: e?.message || "Publish failed",
+            meta: { ...(t.meta || {}), error_meta: e?.meta || null },
+          })
+          .eq("id", t.id)
+      );
+    }
+  }
+
+  await Promise.all(updates);
+
+  const finalStatus = anyFailed ? "failed" : "published";
+  const { data: post2 } = await supabase
+    .from(T_SOCIAL_POSTS)
+    .update({
+      status: finalStatus,
+      published_at: finalStatus === "published" ? new Date().toISOString() : null,
+    })
+    .eq("id", postId)
+    .eq("workspace_id", workspaceId)
+    .select("*")
+    .maybeSingle();
+
+  const { data: targets2 } = await supabase
+    .from(T_SOCIAL_POST_TARGETS)
+    .select("*")
+    .eq("workspace_id", workspaceId)
+    .eq("post_id", postId);
+
+  return { post: post2 || post, targets: targets2 || [] };
+}
+
+const PUBLISHER_WORKER = String(process.env.PUBLISHER_WORKER || "true") === "true";
+
+if (PUBLISHER_WORKER) {
+  setInterval(async () => {
+    try {
+      const nowIso = new Date().toISOString();
+
+      const { data: due, error } = await supabase
+        .from(T_SOCIAL_POSTS)
+        .select("id,workspace_id")
+        .eq("status", "scheduled")
+        .lte("scheduled_at", nowIso)
+        .limit(20);
+
+      if (error) throw error;
+
+      for (const p of due || []) {
+        try {
+          await publishPostNow({ workspaceId: p.workspace_id, postId: p.id });
+        } catch (e) {
+          console.warn("Scheduled publish failed:", p.id, e?.message);
+        }
+      }
+    } catch (e) {
+      console.warn("Publisher worker loop error:", e?.message);
+    }
+  }, 60_000);
+}
+
+/* ============================================================
    INBOX APIs (NO DB)
    ============================================================ */
 
@@ -1540,20 +2564,22 @@ app.get("/api/workspaces/:workspaceId/inbox/stream", async (req, res) => {
       return res.status(401).json({ error: "INVALID_ACCESS_TOKEN" });
     }
 
-    // workspace access check
     if (!isGlobalAdmin(decoded.role)) {
       const role = await getWorkspaceMemberRole(decoded.sub, workspaceId);
       if (!role) return res.status(403).json({ error: "WORKSPACE_FORBIDDEN" });
     }
 
-    res.setHeader("Content-Type", "text/event-stream");
+    // ✅ Prevent proxy buffering (ngrok / nginx)
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
-    res.flushHeaders?.();
+    res.setHeader("X-Accel-Buffering", "no");
+
+    // send headers
+    if (typeof res.flushHeaders === "function") res.flushHeaders();
 
     addSseClient(workspaceId, res);
 
-    // hello + keepalive
     sseWrite(res, "hello", { ok: true, workspaceId, ts: Date.now() });
 
     const keepAlive = setInterval(() => {
@@ -1567,7 +2593,10 @@ app.get("/api/workspaces/:workspaceId/inbox/stream", async (req, res) => {
       removeSseClient(workspaceId, res);
     });
   } catch (e) {
-    return res.status(500).json({ error: "SERVER_ERROR", message: e?.message || "stream failed" });
+    return res.status(500).json({
+      error: "SERVER_ERROR",
+      message: e?.message || "stream failed",
+    });
   }
 });
 
@@ -1603,9 +2632,7 @@ app.get(
         });
       }
 
-      rows = rows
-        .slice()
-        .sort((a, b) => tsNum(b.last_message_at) - tsNum(a.last_message_at));
+      rows = rows.slice().sort((a, b) => tsNum(b.last_message_at) - tsNum(a.last_message_at));
 
       res.json({ threads: rows });
     } catch (e) {
@@ -1620,7 +2647,6 @@ app.get("/api/inbox/threads/:threadId/messages", requireAuth, async (req, res, n
     const { threadId } = req.params;
     const limit = Math.min(500, Math.max(1, Number(req.query.limit || 100)));
 
-    // find workspace from memory thread
     let foundWorkspaceId = "";
     for (const [wsId, ws] of inboxStore.entries()) {
       if (ws.threads.has(threadId)) {
@@ -1630,7 +2656,6 @@ app.get("/api/inbox/threads/:threadId/messages", requireAuth, async (req, res, n
     }
     if (!foundWorkspaceId) return res.status(404).json({ error: "THREAD_NOT_FOUND" });
 
-    // access check
     if (!isGlobalAdmin(req.auth.role)) {
       const role = await getWorkspaceMemberRole(req.auth.userId, foundWorkspaceId);
       if (!role) return res.status(403).json({ error: "WORKSPACE_FORBIDDEN" });
@@ -1654,7 +2679,6 @@ app.post("/api/inbox/threads/:threadId/messages", requireAuth, async (req, res, 
     const text = normalizeText(req.body?.text);
     if (!text) return res.status(400).json({ error: "VALIDATION_ERROR", message: "text required" });
 
-    // locate thread in memory
     let workspaceId = "";
     let thread = null;
 
@@ -1717,11 +2741,8 @@ app.post("/api/inbox/threads/:threadId/messages", requireAuth, async (req, res, 
 
     const sentAt = new Date().toISOString();
     const external_message_id =
-      sendResult?.message_id ||
-      sendResult?.id ||
-      `local_${Date.now()}`;
+      sendResult?.message_id || sendResult?.id || `local_${Date.now()}`;
 
-    // store in memory + emit
     const msg = upsertMessageInMemory(workspaceId, threadId, {
       id: `mem_${Date.now()}_${Math.random().toString(16).slice(2)}`,
       workspace_id: workspaceId,
@@ -1739,7 +2760,6 @@ app.post("/api/inbox/threads/:threadId/messages", requireAuth, async (req, res, 
       meta: sendResult ? { send: sendResult } : { send_error: sendError },
     });
 
-    // update thread snippet in memory + emit
     const updatedThread = upsertThreadInMemory(workspaceId, {
       ...thread,
       last_message_at: sentAt,
