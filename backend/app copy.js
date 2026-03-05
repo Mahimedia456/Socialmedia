@@ -67,6 +67,8 @@ const T_WSM = "workspace_members";
 const T_SOCIAL_POSTS = "social_posts";
 const T_SOCIAL_POST_TARGETS = "social_post_targets";
 
+const T_ANALYTICS_CACHE = "analytics_cache"; // (optional / future)
+
 // Connections
 const T_CHANNELS = "workspace_channels";
 const T_CHANNEL_TOKENS = "channel_tokens";
@@ -76,6 +78,15 @@ const CHANNEL_STATUS_CONNECTED =
   process.env.CHANNEL_STATUS_CONNECTED || "connected";
 const CHANNEL_STATUS_DISCONNECTED =
   process.env.CHANNEL_STATUS_DISCONNECTED || "disconnected";
+
+/* ---------------- Provider helpers ---------------- */
+function providerMeta() {
+  return "meta";
+}
+
+/* ---------------- App ---------------- */
+const app = express();
+app.set("trust proxy", 1);
 
 /* ===================== INBOX MEMORY STORE (NO DB) ===================== */
 /**
@@ -96,7 +107,12 @@ function getWsStore(workspaceId) {
   return inboxStore.get(ws);
 }
 
-function buildThreadId({ provider, platform, channelExternalId, externalThreadId }) {
+function buildThreadId({
+  provider,
+  platform,
+  channelExternalId,
+  externalThreadId,
+}) {
   return `${provider}:${platform}:${channelExternalId}:${externalThreadId}`;
 }
 
@@ -129,7 +145,9 @@ function upsertMessageInMemory(workspaceId, threadId, message) {
       ? `ext:${String(message.external_message_id)}`
       : message.id
       ? `id:${String(message.id)}`
-      : `f:${String(message.direction)}:${String(message.sent_at)}:${String(message.text)}`;
+      : `f:${String(message.direction)}:${String(message.sent_at)}:${String(
+          message.text
+        )}`;
 
   bucket.set(key, { ...bucket.get(key), ...message });
   return bucket.get(key);
@@ -159,7 +177,8 @@ function sseWrite(res, eventName, data) {
 
 function addSseClient(workspaceId, res) {
   const wsId = String(workspaceId || "");
-  if (!sseClientsByWorkspace.has(wsId)) sseClientsByWorkspace.set(wsId, new Set());
+  if (!sseClientsByWorkspace.has(wsId))
+    sseClientsByWorkspace.set(wsId, new Set());
   sseClientsByWorkspace.get(wsId).add(res);
 }
 
@@ -185,7 +204,7 @@ function emitToWorkspace(workspaceId, eventName, payload) {
   }
 }
 
-/* ---------------- Helpers ---------------- */
+/* ---------------- Core helpers ---------------- */
 function safeEmail(v) {
   const s = String(v || "").trim().toLowerCase();
   return s.includes("@") ? s : "";
@@ -214,9 +233,6 @@ function verifyReset(token) {
 function isGlobalAdmin(role) {
   const r = String(role || "").toLowerCase();
   return r === "owner" || r === "admin";
-}
-function providerMeta() {
-  return "meta";
 }
 
 /* ---------------- Email (DEV or SMTP) ---------------- */
@@ -335,7 +351,10 @@ async function getRefreshToken(userId) {
   return data?.token || null;
 }
 async function clearRefreshToken(userId) {
-  const { error } = await supabase.from(T_REFRESH).delete().eq("user_id", userId);
+  const { error } = await supabase
+    .from(T_REFRESH)
+    .delete()
+    .eq("user_id", userId);
   if (error) throw error;
 }
 async function setOtp(userId, code, expiresAtMs) {
@@ -403,7 +422,9 @@ async function ensureDevUsers() {
     updated_at: new Date().toISOString(),
   }));
 
-  const { error } = await supabase.from(T_USERS).upsert(rows, { onConflict: "email" });
+  const { error } = await supabase.from(T_USERS).upsert(rows, {
+    onConflict: "email",
+  });
   if (error) throw error;
 }
 
@@ -452,6 +473,7 @@ async function requireWorkspaceAccess(req, res, next) {
     next(e);
   }
 }
+
 async function getChannelById({ workspaceId, channelId }) {
   const { data, error } = await supabase
     .from(T_CHANNELS)
@@ -463,6 +485,7 @@ async function getChannelById({ workspaceId, channelId }) {
   return data || null;
 }
 
+/* ---------------- Meta HTTP helpers ---------------- */
 async function metaGet(url) {
   const r = await fetch(url);
   const j = await r.json().catch(() => ({}));
@@ -474,7 +497,48 @@ async function metaGet(url) {
   return j;
 }
 
-/* ================= META HELPERS ================= */
+async function metaPostForm(url, formObj) {
+  const body = new URLSearchParams();
+  for (const [k, v] of Object.entries(formObj || {})) {
+    if (v === undefined || v === null) continue;
+    body.set(k, String(v));
+  }
+
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const e = new Error(j?.error?.message || "Meta POST failed");
+    e.meta = j?.error || j;
+    throw e;
+  }
+  return j;
+}
+
+/* --------- Tokens from DB --------- */
+async function getTokenFromDB({ workspaceId, externalId, token_type }) {
+  const provider = providerMeta();
+  const { data, error } = await supabase
+    .from(T_CHANNEL_TOKENS)
+    .select("access_token")
+    .eq("workspace_id", workspaceId)
+    .eq("provider", provider)
+    .eq("external_id", externalId)
+    .eq("token_type", token_type)
+    .maybeSingle();
+  if (error) throw error;
+  return data?.access_token || "";
+}
+
+async function getPageTokenFromDB({ workspaceId, pageId }) {
+  return getTokenFromDB({ workspaceId, externalId: pageId, token_type: "page" });
+}
+
+/* ================= META CONNECT HELPERS ================= */
 function mustEnv(v, name) {
   if (!v) throw new Error(`Missing ${name} in backend/.env`);
   return v;
@@ -483,7 +547,10 @@ function mustEnv(v, name) {
 async function exchangeMetaCodeForToken({ code }) {
   const META_APP_ID = mustEnv(process.env.META_APP_ID, "META_APP_ID");
   const META_APP_SECRET = mustEnv(process.env.META_APP_SECRET, "META_APP_SECRET");
-  const META_REDIRECT_URI = mustEnv(process.env.META_REDIRECT_URI, "META_REDIRECT_URI");
+  const META_REDIRECT_URI = mustEnv(
+    process.env.META_REDIRECT_URI,
+    "META_REDIRECT_URI"
+  );
 
   const url = new URL(
     `https://graph.facebook.com/${META_GRAPH_VERSION}/oauth/access_token`
@@ -496,7 +563,10 @@ async function exchangeMetaCodeForToken({ code }) {
   const r = await fetch(url.toString());
   const j = await r.json().catch(() => ({}));
   if (!r.ok) {
-    const msg = j?.error?.message || j?.error?.error_user_msg || "Token exchange failed";
+    const msg =
+      j?.error?.message ||
+      j?.error?.error_user_msg ||
+      "Token exchange failed";
     throw new Error(msg);
   }
   return j;
@@ -507,7 +577,9 @@ async function fetchMetaPages({ userAccessToken }) {
   let after = null;
 
   while (true) {
-    const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/me/accounts`);
+    const url = new URL(
+      `https://graph.facebook.com/${META_GRAPH_VERSION}/me/accounts`
+    );
     url.searchParams.set(
       "fields",
       [
@@ -546,7 +618,13 @@ async function fetchMetaPages({ userAccessToken }) {
 }
 
 /* --------- FB Messenger pagination --------- */
-async function fetchPageConversations({ pageId, pageToken, limit = 50, after = null, platform = null }) {
+async function fetchPageConversations({
+  pageId,
+  pageToken,
+  limit = 50,
+  after = null,
+  platform = null,
+}) {
   const url = new URL(
     `https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/conversations`
   );
@@ -569,7 +647,12 @@ async function fetchPageConversations({ pageId, pageToken, limit = 50, after = n
   return { data: j?.data || [], paging: j?.paging || null };
 }
 
-async function fetchConversationMessages({ conversationId, pageToken, limit = 50, after = null }) {
+async function fetchConversationMessages({
+  conversationId,
+  pageToken,
+  limit = 50,
+  after = null,
+}) {
   const url = new URL(
     `https://graph.facebook.com/${META_GRAPH_VERSION}/${conversationId}/messages`
   );
@@ -582,7 +665,8 @@ async function fetchConversationMessages({ conversationId, pageToken, limit = 50
   const j = await r.json().catch(() => ({}));
 
   if (!r.ok) {
-    const msg = j?.error?.message || "Failed to fetch conversation messages";
+    const msg =
+      j?.error?.message || "Failed to fetch conversation messages";
     const e = new Error(msg);
     e.meta = j?.error || j;
     throw e;
@@ -591,7 +675,12 @@ async function fetchConversationMessages({ conversationId, pageToken, limit = 50
   return { data: j?.data || [], paging: j?.paging || null };
 }
 
-async function fetchAllPageConversations({ pageId, pageToken, maxConvos = 500, platform = null }) {
+async function fetchAllPageConversations({
+  pageId,
+  pageToken,
+  maxConvos = 500,
+  platform = null,
+}) {
   const all = [];
   let after = null;
 
@@ -616,7 +705,11 @@ async function fetchAllPageConversations({ pageId, pageToken, maxConvos = 500, p
   return all;
 }
 
-async function fetchAllConversationMessages({ conversationId, pageToken, maxMsgs = 500 }) {
+async function fetchAllConversationMessages({
+  conversationId,
+  pageToken,
+  maxMsgs = 500,
+}) {
   const all = [];
   let after = null;
 
@@ -721,28 +814,11 @@ async function fetchAllIgMessages({ conversationId, token, maxMsgs = 500 }) {
   return all;
 }
 
-/* --------- Tokens from DB --------- */
-async function getTokenFromDB({ workspaceId, externalId, token_type }) {
-  const provider = providerMeta();
-  const { data, error } = await supabase
-    .from(T_CHANNEL_TOKENS)
-    .select("access_token")
-    .eq("workspace_id", workspaceId)
-    .eq("provider", provider)
-    .eq("external_id", externalId)
-    .eq("token_type", token_type)
-    .maybeSingle();
-  if (error) throw error;
-  return data?.access_token || "";
-}
-
-async function getPageTokenFromDB({ workspaceId, pageId }) {
-  return getTokenFromDB({ workspaceId, externalId: pageId, token_type: "page" });
-}
-
 /* --------- SEND APIs --------- */
 async function sendFacebookPageMessage({ pageToken, recipientId, text }) {
-  const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/me/messages`);
+  const url = new URL(
+    `https://graph.facebook.com/${META_GRAPH_VERSION}/me/messages`
+  );
   url.searchParams.set("access_token", pageToken);
 
   const body = {
@@ -801,7 +877,8 @@ function verifyMetaSignature({ rawBody, signatureHeader }) {
   if (!signatureHeader) return { ok: true, skipped: true };
 
   const sig = String(signatureHeader || "");
-  if (!sig.startsWith("sha256=")) return { ok: false, reason: "BAD_SIGNATURE_FORMAT" };
+  if (!sig.startsWith("sha256="))
+    return { ok: false, reason: "BAD_SIGNATURE_FORMAT" };
 
   const expected = crypto
     .createHmac("sha256", appSecret)
@@ -812,7 +889,8 @@ function verifyMetaSignature({ rawBody, signatureHeader }) {
 
   const a = Buffer.from(expected, "hex");
   const b = Buffer.from(got, "hex");
-  if (a.length !== b.length) return { ok: false, reason: "SIGNATURE_LEN_MISMATCH" };
+  if (a.length !== b.length)
+    return { ok: false, reason: "SIGNATURE_LEN_MISMATCH" };
 
   const ok = crypto.timingSafeEqual(a, b);
   return ok ? { ok: true } : { ok: false, reason: "SIGNATURE_MISMATCH" };
@@ -821,7 +899,9 @@ function verifyMetaSignature({ rawBody, signatureHeader }) {
 async function findChannelByExternalId({ provider, platform, externalId }) {
   const { data, error } = await supabase
     .from(T_CHANNELS)
-    .select("id,workspace_id,platform,provider,external_id,display_name,status,meta")
+    .select(
+      "id,workspace_id,platform,provider,external_id,display_name,status,meta"
+    )
     .eq("provider", provider)
     .eq("platform", platform)
     .eq("external_id", externalId)
@@ -885,7 +965,8 @@ async function upsertInboundThreadAndMessageMemory({
   });
 
   const extMsgId =
-    messageId || `wh_${channel.external_id}_${participantExternalId}_${Date.now()}`;
+    messageId ||
+    `wh_${channel.external_id}_${participantExternalId}_${Date.now()}`;
 
   const msg = upsertMessageInMemory(workspaceId, threadId, {
     id: `mem_${Date.now()}_${Math.random().toString(16).slice(2)}`,
@@ -910,10 +991,9 @@ async function upsertInboundThreadAndMessageMemory({
   return { threadId };
 }
 
-/* ---------------- App ---------------- */
-const app = express();
-app.set("trust proxy", 1);
-
+/* ============================================================
+   MIDDLEWARES
+============================================================ */
 app.use(
   cors({
     origin: (origin, cb) => {
@@ -955,8 +1035,143 @@ app.get("/api/health", (req, res) =>
 );
 
 /* ============================================================
+   META ANALYTICS HELPERS + API
+============================================================ */
+async function fetchFacebookPostInsights({ postId, pageToken }) {
+  const url = new URL(
+    `https://graph.facebook.com/${META_GRAPH_VERSION}/${postId}/insights`
+  );
+  url.searchParams.set(
+    "metric",
+    "post_impressions,post_engaged_users,post_reactions_by_type_total"
+  );
+  url.searchParams.set("access_token", pageToken);
+  return metaGet(url.toString());
+}
+
+async function fetchFacebookPageInsights({ pageId, pageToken, since, until }) {
+  const url = new URL(
+    `https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/insights`
+  );
+  url.searchParams.set(
+    "metric",
+    "page_impressions,page_engaged_users,page_fans"
+  );
+  url.searchParams.set("since", since);
+  url.searchParams.set("until", until);
+  url.searchParams.set("access_token", pageToken);
+  return metaGet(url.toString());
+}
+
+app.get(
+  "/api/workspaces/:workspaceId/analytics/meta",
+  requireAuth,
+  requireWorkspaceAccess,
+  async (req, res, next) => {
+    try {
+      const { workspaceId } = req.params;
+      const days = Math.min(90, Math.max(1, Number(req.query.days || 30)));
+
+      const since = Math.floor((Date.now() - days * 86400000) / 1000);
+      const until = Math.floor(Date.now() / 1000);
+
+      const provider = providerMeta();
+
+      const { data: channels, error } = await supabase
+        .from(T_CHANNELS)
+        .select("*")
+        .eq("workspace_id", workspaceId)
+        .eq("provider", provider)
+        .eq("status", CHANNEL_STATUS_CONNECTED);
+
+      if (error) throw error;
+
+      const analytics = {
+        impressions: 0,
+        engagement: 0,
+        followers: 0,
+        posts: [],
+      };
+
+      for (const ch of channels || []) {
+        if (ch.platform !== "facebook") continue;
+
+        const pageId = ch.external_id;
+
+        const token = await getPageTokenFromDB({
+          workspaceId,
+          pageId,
+        });
+
+        if (!token) continue;
+
+        const pageInsights = await fetchFacebookPageInsights({
+          pageId,
+          pageToken: token,
+          since,
+          until,
+        });
+
+        for (const metric of pageInsights?.data || []) {
+          const v = metric?.values?.[0]?.value || 0;
+          if (metric.name === "page_impressions") analytics.impressions += v;
+          if (metric.name === "page_engaged_users") analytics.engagement += v;
+          if (metric.name === "page_fans") analytics.followers = v;
+        }
+
+        const feedUrl = new URL(
+          `https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/posts`
+        );
+
+        feedUrl.searchParams.set(
+          "fields",
+          "id,message,created_time,permalink_url,likes.summary(true),comments.summary(true),shares"
+        );
+
+        feedUrl.searchParams.set("limit", "50");
+        feedUrl.searchParams.set("access_token", token);
+
+        const posts = await metaGet(feedUrl.toString());
+
+        for (const p of posts?.data || []) {
+          const likes = p?.likes?.summary?.total_count || 0;
+          const comments = p?.comments?.summary?.total_count || 0;
+          const shares = p?.shares?.count || 0;
+
+          const score = likes + comments + shares;
+
+          analytics.posts.push({
+            id: p.id,
+            message: p.message || "",
+            created_time: p.created_time,
+            permalink: p.permalink_url,
+            likes,
+            comments,
+            shares,
+            engagement_score: score,
+          });
+        }
+      }
+
+      analytics.posts.sort((a, b) => b.engagement_score - a.engagement_score);
+
+      res.json({
+        ok: true,
+        days,
+        impressions: analytics.impressions,
+        engagement: analytics.engagement,
+        followers: analytics.followers,
+        top_posts: analytics.posts.slice(0, 10),
+      });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+/* ============================================================
    FEEDS APIs (READ-ONLY)
-   ============================================================ */
+============================================================ */
 
 // Facebook Page feed
 app.get(
@@ -982,7 +1197,11 @@ app.get(
       const ch = await getChannelById({ workspaceId, channelId: page_channel_id });
       if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
 
-      if (ch.provider !== provider || ch.platform !== "facebook" || ch.status !== CHANNEL_STATUS_CONNECTED) {
+      if (
+        ch.provider !== provider ||
+        ch.platform !== "facebook" ||
+        ch.status !== CHANNEL_STATUS_CONNECTED
+      ) {
         return res.status(400).json({
           error: "INVALID_CHANNEL",
           message: "Not a connected Facebook channel",
@@ -991,9 +1210,14 @@ app.get(
 
       const pageId = String(ch.external_id);
       const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
-      if (!pageToken) return res.status(400).json({ error: "MISSING_TOKEN", message: "Missing page token" });
+      if (!pageToken)
+        return res
+          .status(400)
+          .json({ error: "MISSING_TOKEN", message: "Missing page token" });
 
-      const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/feed`);
+      const url = new URL(
+        `https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/feed`
+      );
       url.searchParams.set(
         "fields",
         [
@@ -1049,7 +1273,11 @@ app.get(
       const ch = await getChannelById({ workspaceId, channelId: ig_channel_id });
       if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
 
-      if (ch.provider !== provider || ch.platform !== "instagram" || ch.status !== CHANNEL_STATUS_CONNECTED) {
+      if (
+        ch.provider !== provider ||
+        ch.platform !== "instagram" ||
+        ch.status !== CHANNEL_STATUS_CONNECTED
+      ) {
         return res.status(400).json({
           error: "INVALID_CHANNEL",
           message: "Not a connected Instagram channel",
@@ -1058,16 +1286,21 @@ app.get(
 
       const igUserId = String(ch.external_id);
 
-      // You are storing token under external_id=igUserId token_type=page (page token)
+      // stored under external_id=igUserId token_type=page (page token)
       const token = await getTokenFromDB({
         workspaceId,
         externalId: igUserId,
         token_type: "page",
       });
 
-      if (!token) return res.status(400).json({ error: "MISSING_TOKEN", message: "Missing IG token" });
+      if (!token)
+        return res
+          .status(400)
+          .json({ error: "MISSING_TOKEN", message: "Missing IG token" });
 
-      const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media`);
+      const url = new URL(
+        `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media`
+      );
       url.searchParams.set(
         "fields",
         [
@@ -1100,36 +1333,11 @@ app.get(
   }
 );
 
-
-/* ============================================================
-   FEEDS APIs
-   ============================================================ */
-
-async function metaPostForm(url, formObj) {
-  const body = new URLSearchParams();
-  for (const [k, v] of Object.entries(formObj || {})) {
-    if (v === undefined || v === null) continue;
-    body.set(k, String(v));
-  }
-
-  const r = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
-
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) {
-    const e = new Error(j?.error?.message || "Meta POST failed");
-    e.meta = j?.error || j;
-    throw e;
-  }
-  return j;
-}
-
-/* ---------------- Facebook Page feed ---------------- */
+/* ---------------- Facebook: Fetch comments for a post ----------------
+   GET /feeds/facebook/comments?page_channel_id=...&post_id=...&limit=50&after=...
+*/
 app.get(
-  "/api/workspaces/:workspaceId/feeds/facebook",
+  "/api/workspaces/:workspaceId/feeds/facebook/comments",
   requireAuth,
   requireWorkspaceAccess,
   async (req, res, next) => {
@@ -1138,14 +1346,19 @@ app.get(
       const provider = providerMeta();
 
       const page_channel_id = String(req.query.page_channel_id || "");
-      const limit = Math.min(50, Math.max(1, Number(req.query.limit || 25)));
+      const post_id = String(req.query.post_id || "");
+      const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
       const after = String(req.query.after || "");
 
       if (!page_channel_id) {
-        return res.status(400).json({
-          error: "VALIDATION_ERROR",
-          message: "page_channel_id is required",
-        });
+        return res
+          .status(400)
+          .json({ error: "VALIDATION_ERROR", message: "page_channel_id is required" });
+      }
+      if (!post_id) {
+        return res
+          .status(400)
+          .json({ error: "VALIDATION_ERROR", message: "post_id is required" });
       }
 
       const ch = await getChannelById({ workspaceId, channelId: page_channel_id });
@@ -1165,92 +1378,18 @@ app.get(
       const pageId = String(ch.external_id);
       const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
       if (!pageToken)
-        return res.status(400).json({ error: "MISSING_TOKEN", message: "Missing page token" });
+        return res
+          .status(400)
+          .json({ error: "MISSING_TOKEN", message: "Missing page token" });
 
-      const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/feed`);
-      url.searchParams.set(
-        "fields",
-        [
-          "id",
-          "message",
-          "story",
-          "created_time",
-          "permalink_url",
-          "full_picture",
-          "attachments{media_type,media,url,title,description}",
-          "likes.summary(true).limit(0)",
-          "comments.summary(true).limit(5){id,message,from,created_time,comment_count}",
-        ].join(",")
+      const url = new URL(
+        `https://graph.facebook.com/${META_GRAPH_VERSION}/${post_id}/comments`
       );
-      url.searchParams.set("limit", String(limit));
-      if (after) url.searchParams.set("after", after);
-      url.searchParams.set("access_token", pageToken);
-
-      const j = await metaGet(url.toString());
-      return res.json({
-        ok: true,
-        channel: { id: ch.id, display_name: ch.display_name, external_id: pageId },
-        data: j?.data || [],
-        paging: j?.paging || null,
-      });
-    } catch (e) {
-      next(e);
-    }
-  }
-);
-
-/* ---------------- Facebook: Fetch comments for a post ----------------
-   GET /feeds/facebook/comments?page_channel_id=...&post_id=...&limit=50&after=...
-*/
-app.get(
-  "/api/workspaces/:workspaceId/feeds/facebook/comments",
-  requireAuth,
-  requireWorkspaceAccess,
-  async (req, res, next) => {
-    try {
-      const { workspaceId } = req.params;
-      const provider = providerMeta();
-
-      const page_channel_id = String(req.query.page_channel_id || "");
-      const post_id = String(req.query.post_id || "");
-      const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
-      const after = String(req.query.after || "");
-
-      if (!page_channel_id) {
-        return res.status(400).json({ error: "VALIDATION_ERROR", message: "page_channel_id is required" });
-      }
-      if (!post_id) {
-        return res.status(400).json({ error: "VALIDATION_ERROR", message: "post_id is required" });
-      }
-
-      const ch = await getChannelById({ workspaceId, channelId: page_channel_id });
-      if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
-
-      if (
-        ch.provider !== provider ||
-        ch.platform !== "facebook" ||
-        ch.status !== CHANNEL_STATUS_CONNECTED
-      ) {
-        return res.status(400).json({ error: "INVALID_CHANNEL", message: "Not a connected Facebook channel" });
-      }
-
-      const pageId = String(ch.external_id);
-      const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
-      if (!pageToken) return res.status(400).json({ error: "MISSING_TOKEN", message: "Missing page token" });
-
-      const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/${post_id}/comments`);
       url.searchParams.set(
         "fields",
-        [
-          "id",
-          "message",
-          "from",
-          "created_time",
-          "comment_count",
-          "like_count",
-          "user_likes",
-          "parent",
-        ].join(",")
+        ["id", "message", "from", "created_time", "comment_count", "like_count", "parent"].join(
+          ","
+        )
       );
       url.searchParams.set("limit", String(limit));
       if (after) url.searchParams.set("after", after);
@@ -1286,15 +1425,18 @@ app.post(
       const comment_id = String(req.body?.comment_id || "");
       const message = String(req.body?.message || "").trim();
 
-      if (!page_channel_id) {
-        return res.status(400).json({ error: "VALIDATION_ERROR", message: "page_channel_id is required" });
-      }
-      if (!comment_id) {
-        return res.status(400).json({ error: "VALIDATION_ERROR", message: "comment_id is required" });
-      }
-      if (!message) {
-        return res.status(400).json({ error: "VALIDATION_ERROR", message: "message is required" });
-      }
+      if (!page_channel_id)
+        return res
+          .status(400)
+          .json({ error: "VALIDATION_ERROR", message: "page_channel_id is required" });
+      if (!comment_id)
+        return res
+          .status(400)
+          .json({ error: "VALIDATION_ERROR", message: "comment_id is required" });
+      if (!message)
+        return res
+          .status(400)
+          .json({ error: "VALIDATION_ERROR", message: "message is required" });
 
       const ch = await getChannelById({ workspaceId, channelId: page_channel_id });
       if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
@@ -1304,19 +1446,21 @@ app.post(
         ch.platform !== "facebook" ||
         ch.status !== CHANNEL_STATUS_CONNECTED
       ) {
-        return res.status(400).json({ error: "INVALID_CHANNEL", message: "Not a connected Facebook channel" });
+        return res.status(400).json({
+          error: "INVALID_CHANNEL",
+          message: "Not a connected Facebook channel",
+        });
       }
 
       const pageId = String(ch.external_id);
       const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
-      if (!pageToken) return res.status(400).json({ error: "MISSING_TOKEN", message: "Missing page token" });
+      if (!pageToken)
+        return res
+          .status(400)
+          .json({ error: "MISSING_TOKEN", message: "Missing page token" });
 
       const url = `https://graph.facebook.com/${META_GRAPH_VERSION}/${comment_id}/comments`;
-
-      const j = await metaPostForm(url, {
-        access_token: pageToken,
-        message,
-      });
+      const j = await metaPostForm(url, { access_token: pageToken, message });
 
       return res.json({ ok: true, result: j });
     } catch (e) {
@@ -1341,12 +1485,14 @@ app.post(
       const page_channel_id = String(req.body?.page_channel_id || "");
       const post_id = String(req.body?.post_id || "");
 
-      if (!page_channel_id) {
-        return res.status(400).json({ error: "VALIDATION_ERROR", message: "page_channel_id is required" });
-      }
-      if (!post_id) {
-        return res.status(400).json({ error: "VALIDATION_ERROR", message: "post_id is required" });
-      }
+      if (!page_channel_id)
+        return res
+          .status(400)
+          .json({ error: "VALIDATION_ERROR", message: "page_channel_id is required" });
+      if (!post_id)
+        return res
+          .status(400)
+          .json({ error: "VALIDATION_ERROR", message: "post_id is required" });
 
       const ch = await getChannelById({ workspaceId, channelId: page_channel_id });
       if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
@@ -1356,15 +1502,20 @@ app.post(
         ch.platform !== "facebook" ||
         ch.status !== CHANNEL_STATUS_CONNECTED
       ) {
-        return res.status(400).json({ error: "INVALID_CHANNEL", message: "Not a connected Facebook channel" });
+        return res.status(400).json({
+          error: "INVALID_CHANNEL",
+          message: "Not a connected Facebook channel",
+        });
       }
 
       const pageId = String(ch.external_id);
       const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
-      if (!pageToken) return res.status(400).json({ error: "MISSING_TOKEN", message: "Missing page token" });
+      if (!pageToken)
+        return res
+          .status(400)
+          .json({ error: "MISSING_TOKEN", message: "Missing page token" });
 
       const url = `https://graph.facebook.com/${META_GRAPH_VERSION}/${post_id}/likes`;
-
       const j = await metaPostForm(url, { access_token: pageToken });
       return res.json({ ok: true, result: j });
     } catch (e) {
@@ -1390,15 +1541,18 @@ app.post(
       const post_id = String(req.body?.post_id || "");
       const message = String(req.body?.message || "").trim();
 
-      if (!page_channel_id) {
-        return res.status(400).json({ error: "VALIDATION_ERROR", message: "page_channel_id is required" });
-      }
-      if (!post_id) {
-        return res.status(400).json({ error: "VALIDATION_ERROR", message: "post_id is required" });
-      }
-      if (!message) {
-        return res.status(400).json({ error: "VALIDATION_ERROR", message: "message is required" });
-      }
+      if (!page_channel_id)
+        return res
+          .status(400)
+          .json({ error: "VALIDATION_ERROR", message: "page_channel_id is required" });
+      if (!post_id)
+        return res
+          .status(400)
+          .json({ error: "VALIDATION_ERROR", message: "post_id is required" });
+      if (!message)
+        return res
+          .status(400)
+          .json({ error: "VALIDATION_ERROR", message: "message is required" });
 
       const ch = await getChannelById({ workspaceId, channelId: page_channel_id });
       if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
@@ -1408,19 +1562,21 @@ app.post(
         ch.platform !== "facebook" ||
         ch.status !== CHANNEL_STATUS_CONNECTED
       ) {
-        return res.status(400).json({ error: "INVALID_CHANNEL", message: "Not a connected Facebook channel" });
+        return res.status(400).json({
+          error: "INVALID_CHANNEL",
+          message: "Not a connected Facebook channel",
+        });
       }
 
       const pageId = String(ch.external_id);
       const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
-      if (!pageToken) return res.status(400).json({ error: "MISSING_TOKEN", message: "Missing page token" });
+      if (!pageToken)
+        return res
+          .status(400)
+          .json({ error: "MISSING_TOKEN", message: "Missing page token" });
 
       const url = `https://graph.facebook.com/${META_GRAPH_VERSION}/${post_id}/comments`;
-
-      const j = await metaPostForm(url, {
-        access_token: pageToken,
-        message,
-      });
+      const j = await metaPostForm(url, { access_token: pageToken, message });
 
       return res.json({ ok: true, result: j });
     } catch (e) {
@@ -1429,96 +1585,21 @@ app.post(
   }
 );
 
-/* ---------------- Instagram media feed ---------------- */
-app.get(
-  "/api/workspaces/:workspaceId/feeds/instagram",
-  requireAuth,
-  requireWorkspaceAccess,
-  async (req, res, next) => {
-    try {
-      const { workspaceId } = req.params;
-      const provider = providerMeta();
-
-      const ig_channel_id = String(req.query.ig_channel_id || "");
-      const limit = Math.min(50, Math.max(1, Number(req.query.limit || 25)));
-      const after = String(req.query.after || "");
-
-      if (!ig_channel_id) {
-        return res.status(400).json({
-          error: "VALIDATION_ERROR",
-          message: "ig_channel_id is required",
-        });
-      }
-
-      const ch = await getChannelById({ workspaceId, channelId: ig_channel_id });
-      if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
-
-      if (
-        ch.provider !== provider ||
-        ch.platform !== "instagram" ||
-        ch.status !== CHANNEL_STATUS_CONNECTED
-      ) {
-        return res.status(400).json({
-          error: "INVALID_CHANNEL",
-          message: "Not a connected Instagram channel",
-        });
-      }
-
-      const igUserId = String(ch.external_id);
-
-      // stored under external_id=igUserId token_type=page
-      const token = await getTokenFromDB({
-        workspaceId,
-        externalId: igUserId,
-        token_type: "page",
-      });
-
-      if (!token)
-        return res.status(400).json({ error: "MISSING_TOKEN", message: "Missing IG token" });
-
-      const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media`);
-      url.searchParams.set(
-        "fields",
-        [
-          "id",
-          "caption",
-          "media_type",
-          "media_url",
-          "thumbnail_url",
-          "permalink",
-          "timestamp",
-          "username",
-          "like_count",
-          "comments_count",
-        ].join(",")
-      );
-      url.searchParams.set("limit", String(limit));
-      if (after) url.searchParams.set("after", after);
-      url.searchParams.set("access_token", token);
-
-      const j = await metaGet(url.toString());
-      return res.json({
-        ok: true,
-        channel: { id: ch.id, display_name: ch.display_name, external_id: igUserId },
-        data: j?.data || [],
-        paging: j?.paging || null,
-      });
-    } catch (e) {
-      next(e);
-    }
-  }
-);
 /* ============================================================
    META WEBHOOK
-   ============================================================ */
-
+============================================================ */
 function handleMetaWebhookGet(req, res) {
   try {
     const mode = String(req.query["hub.mode"] || "");
     const token = String(req.query["hub.verify_token"] || "");
     const challenge = String(req.query["hub.challenge"] || "");
 
-    if (mode === "subscribe" && token && META_VERIFY_TOKEN && token === META_VERIFY_TOKEN) {
+    if (
+      mode === "subscribe" &&
+      token &&
+      META_VERIFY_TOKEN &&
+      token === META_VERIFY_TOKEN
+    ) {
       console.log("META WEBHOOK VERIFIED");
       return res.status(200).send(challenge);
     }
@@ -1573,7 +1654,8 @@ async function handleMetaWebhookPost(req, res) {
         if (field.includes("message") || field.includes("messaging")) {
           if (Array.isArray(value?.messaging)) out.push(...value.messaging);
           if (Array.isArray(value?.messages)) out.push(...value.messages);
-          if (Array.isArray(value?.entry?.[0]?.messaging)) out.push(...value.entry[0].messaging);
+          if (Array.isArray(value?.entry?.[0]?.messaging))
+            out.push(...value.entry[0].messaging);
         }
       }
       return out;
@@ -1596,7 +1678,7 @@ async function handleMetaWebhookPost(req, res) {
       });
 
       if (!channel) {
-        // if you see ignored++ increasing, it means your channel external_id doesn't match webhook entry.id
+        // If ignored increases: your channel.external_id doesn't match webhook entry.id
         ignored += 1;
         continue;
       }
@@ -1635,7 +1717,8 @@ async function handleMetaWebhookPost(req, res) {
             continue;
           }
 
-          const tsMs = typeof ev?.timestamp === "number" ? ev.timestamp : Date.now();
+          const tsMs =
+            typeof ev?.timestamp === "number" ? ev.timestamp : Date.now();
           const sentAtISO = new Date(tsMs).toISOString();
 
           await upsertInboundThreadAndMessageMemory({
@@ -1677,7 +1760,7 @@ app.post("/api/webhooks/meta", handleMetaWebhookPost);
 
 /* ============================================================
    AUTH APIs
-   ============================================================ */
+============================================================ */
 app.post("/api/auth/login", async (req, res, next) => {
   try {
     const email = safeEmail(req.body?.email);
@@ -1719,9 +1802,14 @@ app.post("/api/auth/refresh-token", async (req, res) => {
     if (!user) return res.status(401).json({ error: "INVALID_REFRESH_TOKEN" });
 
     const saved = await getRefreshToken(user.id);
-    if (saved !== token) return res.status(401).json({ error: "REFRESH_REVOKED" });
+    if (saved !== token)
+      return res.status(401).json({ error: "REFRESH_REVOKED" });
 
-    const access_token = signAccess({ sub: user.id, email: user.email, role: user.role });
+    const access_token = signAccess({
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+    });
     return res.json({ access_token });
   } catch {
     return res.status(401).json({ error: "INVALID_REFRESH_TOKEN" });
@@ -1747,7 +1835,9 @@ app.post("/api/auth/forgot-password", async (req, res, next) => {
   try {
     const email = safeEmail(req.body?.email);
     if (!email)
-      return res.status(400).json({ error: "VALIDATION_ERROR", message: "Email required." });
+      return res
+        .status(400)
+        .json({ error: "VALIDATION_ERROR", message: "Email required." });
 
     const user = await getUserByEmail(email);
     if (!user) return res.json({ ok: true });
@@ -1846,7 +1936,7 @@ app.post("/api/auth/reset-password", async (req, res, next) => {
 
 /* ============================================================
    WORKSPACES APIs
-   ============================================================ */
+============================================================ */
 app.get("/api/workspaces", requireAuth, async (req, res, next) => {
   try {
     if (isGlobalAdmin(req.auth.role)) {
@@ -1887,7 +1977,7 @@ app.get("/api/workspaces", requireAuth, async (req, res, next) => {
 
 /* ============================================================
    CHANNELS APIs
-   ============================================================ */
+============================================================ */
 app.get(
   "/api/workspaces/:workspaceId/channels",
   requireAuth,
@@ -1939,7 +2029,7 @@ app.post(
 
 /* ============================================================
    META CONNECT APIs
-   ============================================================ */
+============================================================ */
 app.post("/api/meta/exchange", requireAuth, async (req, res, next) => {
   try {
     const code = String(req.body?.code || "");
@@ -1961,7 +2051,8 @@ app.post("/api/meta/exchange", requireAuth, async (req, res, next) => {
     const pages = await fetchMetaPages({ userAccessToken });
 
     const normalized = (pages || []).map((p) => {
-      const ig = p.instagram_business_account || p.connected_instagram_account || null;
+      const ig =
+        p.instagram_business_account || p.connected_instagram_account || null;
       return {
         pageId: String(p.id),
         pageName: String(p.name || "Facebook Page"),
@@ -2120,10 +2211,11 @@ app.post("/api/meta/connect-pages", requireAuth, async (req, res, next) => {
 
 /* ============================================================
    PUBLISHER HELPERS (META)
-   ============================================================ */
-
+============================================================ */
 async function publishFacebookPost({ pageId, pageToken, message, link }) {
-  const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/feed`);
+  const url = new URL(
+    `https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/feed`
+  );
 
   const body = new URLSearchParams();
   body.set("access_token", pageToken);
@@ -2146,17 +2238,20 @@ async function publishFacebookPost({ pageId, pageToken, message, link }) {
 }
 
 async function publishInstagramPost({ igUserId, token, caption, imageUrl }) {
-  if (!imageUrl) throw new Error("Instagram publishing requires imageUrl (feed posts can't be text-only).");
+  if (!imageUrl)
+    throw new Error(
+      "Instagram publishing requires imageUrl (feed posts can't be text-only)."
+    );
 
-  const createUrl = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media`);
+  const createUrl = new URL(
+    `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media`
+  );
   createUrl.searchParams.set("access_token", token);
-
-  const createBody = { image_url: imageUrl, caption: caption || "" };
 
   const r1 = await fetch(createUrl.toString(), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(createBody),
+    body: JSON.stringify({ image_url: imageUrl, caption: caption || "" }),
   });
 
   const j1 = await r1.json().catch(() => ({}));
@@ -2169,7 +2264,9 @@ async function publishInstagramPost({ igUserId, token, caption, imageUrl }) {
   const creationId = j1?.id;
   if (!creationId) throw new Error("IG create media returned no id.");
 
-  const pubUrl = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media_publish`);
+  const pubUrl = new URL(
+    `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media_publish`
+  );
   pubUrl.searchParams.set("access_token", token);
 
   const r2 = await fetch(pubUrl.toString(), {
@@ -2190,8 +2287,7 @@ async function publishInstagramPost({ igUserId, token, caption, imageUrl }) {
 
 /* ============================================================
    PUBLISHER APIs
-   ============================================================ */
-
+============================================================ */
 app.get(
   "/api/workspaces/:workspaceId/publisher/channels",
   requireAuth,
@@ -2387,7 +2483,6 @@ app.post(
 );
 
 /* ---------------- Publisher publish engine ---------------- */
-
 async function publishPostNow({ workspaceId, postId }) {
   const { data: post, error: pErr } = await supabase
     .from(T_SOCIAL_POSTS)
@@ -2467,7 +2562,7 @@ async function publishPostNow({ workspaceId, postId }) {
             .from(T_SOCIAL_POST_TARGETS)
             .update({
               status: "published",
-              published_id: String(r?.id || ""),
+              published_id: String(r?.id || r?.media_id || ""),
               meta: { ...(t.meta || {}), result: r },
             })
             .eq("id", t.id)
@@ -2513,7 +2608,8 @@ async function publishPostNow({ workspaceId, postId }) {
   return { post: post2 || post, targets: targets2 || [] };
 }
 
-const PUBLISHER_WORKER = String(process.env.PUBLISHER_WORKER || "true") === "true";
+const PUBLISHER_WORKER =
+  String(process.env.PUBLISHER_WORKER || "true") === "true";
 
 if (PUBLISHER_WORKER) {
   setInterval(async () => {
@@ -2544,7 +2640,7 @@ if (PUBLISHER_WORKER) {
 
 /* ============================================================
    INBOX APIs (NO DB)
-   ============================================================ */
+============================================================ */
 
 /**
  * ✅ SSE realtime stream
@@ -2575,11 +2671,9 @@ app.get("/api/workspaces/:workspaceId/inbox/stream", async (req, res) => {
     res.setHeader("Connection", "keep-alive");
     res.setHeader("X-Accel-Buffering", "no");
 
-    // send headers
     if (typeof res.flushHeaders === "function") res.flushHeaders();
 
     addSseClient(workspaceId, res);
-
     sseWrite(res, "hello", { ok: true, workspaceId, ts: Date.now() });
 
     const keepAlive = setInterval(() => {
@@ -2633,7 +2727,6 @@ app.get(
       }
 
       rows = rows.slice().sort((a, b) => tsNum(b.last_message_at) - tsNum(a.last_message_at));
-
       res.json({ threads: rows });
     } catch (e) {
       next(e);
@@ -2740,8 +2833,7 @@ app.post("/api/inbox/threads/:threadId/messages", requireAuth, async (req, res, 
     }
 
     const sentAt = new Date().toISOString();
-    const external_message_id =
-      sendResult?.message_id || sendResult?.id || `local_${Date.now()}`;
+    const external_message_id = sendResult?.message_id || sendResult?.id || `local_${Date.now()}`;
 
     const msg = upsertMessageInMemory(workspaceId, threadId, {
       id: `mem_${Date.now()}_${Math.random().toString(16).slice(2)}`,
@@ -2884,9 +2976,7 @@ app.post(
             const fromName = m?.from?.name ? String(m.from.name) : null;
             const text = normalizeText(m.message);
 
-            const direction =
-              fromId && String(fromId) === String(pageId) ? "outbound" : "inbound";
-
+            const direction = fromId && String(fromId) === String(pageId) ? "outbound" : "inbound";
             if (text) latestText = text;
 
             const msg = upsertMessageInMemory(workspaceId, threadId, {
@@ -2951,10 +3041,15 @@ app.post(
         let usedFallback = false;
 
         try {
-          convos = await fetchAllIgConversations({ igUserId, token: igToken, maxConvos: 200 });
+          convos = await fetchAllIgConversations({
+            igUserId,
+            token: igToken,
+            maxConvos: 200,
+          });
         } catch (e1) {
           try {
-            if (!pageIdForIg) throw new Error("IG channel meta.page_id missing (needed for fallback)");
+            if (!pageIdForIg)
+              throw new Error("IG channel meta.page_id missing (needed for fallback)");
             convos = await fetchAllPageConversations({
               pageId: pageIdForIg,
               pageToken: igToken,
@@ -2990,7 +3085,9 @@ app.post(
 
           const participantExternalId = other?.id ? String(other.id) : null;
           const participantName =
-            other?.username || other?.name ? String(other.username || other.name) : "IG User";
+            other?.username || other?.name
+              ? String(other.username || other.name)
+              : "IG User";
 
           const threadId = buildThreadId({
             provider,
@@ -3054,7 +3151,9 @@ app.post(
 
             const fromId = m?.from?.id ? String(m.from.id) : null;
             const fromName =
-              m?.from?.username || m?.from?.name ? String(m.from.username || m.from.name) : null;
+              m?.from?.username || m?.from?.name
+                ? String(m.from.username || m.from.name)
+                : null;
             const text = normalizeText(m.message);
 
             const direction =
