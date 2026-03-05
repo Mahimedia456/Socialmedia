@@ -27,24 +27,21 @@ const DEFAULT_SCOPES = [
   "public_profile",
   "email",
 
-  // Facebook Pages
   "pages_show_list",
   "pages_read_engagement",
+  "pages_read_user_content",
+  "pages_manage_metadata",
   "pages_manage_posts",
-  "pages_manage_engagement",
 
-  // Business login / asset selection
-  "business_management",
-
-  // Instagram (Graph API, Professional account connected to a Page)
   "instagram_basic",
+  "instagram_manage_insights",
   "instagram_content_publish",
   "instagram_manage_comments",
-  "instagram_manage_insights",
 
-  // (Optional) Messaging product – only if you really use inbox
+  "business_management",
+
   "pages_messaging",
-  "instagram_manage_messages",
+  "instagram_manage_messages"
 ];
 export function buildMetaAuthUrl({ workspaceId }) {
   const META_APP_ID = import.meta.env.VITE_META_APP_ID;

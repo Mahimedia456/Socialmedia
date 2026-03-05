@@ -13,6 +13,7 @@ import metaRoutes from "./routes/meta.routes.js";
 import metaWebhookRoutes from "./routes/meta.webhook.routes.js";
 import publisherRoutes from "./routes/publisher.routes.js";
 import healthRoutes from "./routes/health.routes.js";
+import analyticsRoutes from "./routes/analytics.routes.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -38,5 +39,6 @@ app.use("/api", feedsRoutes);
 app.use("/api", inboxRoutes);
 app.use("/api", metaRoutes);
 app.use("/api", publisherRoutes);
+app.use("/api", analyticsRoutes);
 
 export default app;
