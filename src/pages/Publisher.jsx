@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import AppShell from "../components/AppShell.jsx";
-import { apiFetch, getActiveWorkspaceId, setActiveWorkspaceId } from "../lib/api.js";
+import { apiFetch, getActiveWorkspaceId, setActiveWorkspaceId, getSession } from "../lib/api.js";
 
 const ICON_BY_PLATFORM = {
   facebook: {
@@ -17,19 +17,24 @@ function cn(...a) {
   return a.filter(Boolean).join(" ");
 }
 
+function isImageFile(file) {
+  return !!file && String(file.type || "").startsWith("image/");
+}
+
+function isVideoFile(file) {
+  return !!file && String(file.type || "").startsWith("video/");
+}
+
 export default function Publisher({ theme, setTheme }) {
+  const API_BASE = import.meta.env.VITE_API_BASE?.trim();
+
+  const fileInputRef = useRef(null);
+
   const [topTab, setTopTab] = useState("drafts"); // drafts | scheduled | sent
 
   const [postType, setPostType] = useState("text"); // text | image | video | link
   const [text, setText] = useState("");
   const [linkUrl, setLinkUrl] = useState("");
-
-  const [imageUrl, setImageUrl] = useState("");
-  const [assets, setAssets] = useState([]);
-
-  const [scheduleOn, setScheduleOn] = useState(true);
-  const [date, setDate] = useState("");
-  const [time, setTime] = useState("");
 
   const [workspaces, setWorkspaces] = useState([]);
   const [workspaceId, setWorkspaceIdState] = useState(getActiveWorkspaceId() || "");
@@ -40,11 +45,22 @@ export default function Publisher({ theme, setTheme }) {
   const [scheduled, setScheduled] = useState([]);
   const [published, setPublished] = useState([]);
 
+  const [scheduleOn, setScheduleOn] = useState(true);
+  const [date, setDate] = useState("");
+  const [time, setTime] = useState("");
+
   const [loadingWorkspaces, setLoadingWorkspaces] = useState(false);
   const [loadingChannels, setLoadingChannels] = useState(false);
   const [loadingLists, setLoadingLists] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [err, setErr] = useState("");
+
+  const [localFile, setLocalFile] = useState(null);
+  const [localPreviewUrl, setLocalPreviewUrl] = useState("");
+  const [uploadedMediaUrl, setUploadedMediaUrl] = useState("");
+  const [uploadedMediaKind, setUploadedMediaKind] = useState(""); // image | video
+  const [uploadMeta, setUploadMeta] = useState(null);
 
   const limit = 280;
   const count = useMemo(() => (text || "").length, [text]);
@@ -54,14 +70,36 @@ export default function Publisher({ theme, setTheme }) {
     return channels.filter((c) => set.has(c.id));
   }, [channels, selectedChannelIds]);
 
-  const needsIgImage = useMemo(() => {
+  const hasInstagramSelected = useMemo(() => {
     return selectedChannels.some((c) => c.platform === "instagram");
   }, [selectedChannels]);
+
+  const hasFacebookSelected = useMemo(() => {
+    return selectedChannels.some((c) => c.platform === "facebook");
+  }, [selectedChannels]);
+
+  const requiresMedia = useMemo(() => {
+    return postType === "image" || postType === "video" || hasInstagramSelected;
+  }, [postType, hasInstagramSelected]);
+
+  const composerMediaUrl = uploadedMediaUrl || "";
+  const composerMediaPreview = localPreviewUrl || uploadedMediaUrl || "";
 
   function setWorkspaceId(id) {
     const wsId = String(id || "");
     setWorkspaceIdState(wsId);
     setActiveWorkspaceId(wsId);
+  }
+
+  function getAccessToken() {
+    const s = getSession?.();
+    return (
+      s?.access_token ||
+      s?.accessToken ||
+      s?.token ||
+      localStorage.getItem("access_token") ||
+      ""
+    );
   }
 
   const toggleChannel = (id) => {
@@ -157,8 +195,6 @@ export default function Publisher({ theme, setTheme }) {
 
       setDrafts(d?.posts || []);
       setScheduled(s?.posts || []);
-
-      // published endpoint abhi backend mein nahi hai, to sent tab ko placeholder/feed style rakhenge
       setPublished([]);
     } catch (e) {
       setErr(String(e?.message || e));
@@ -182,20 +218,122 @@ export default function Publisher({ theme, setTheme }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId]);
 
+  useEffect(() => {
+    return () => {
+      if (localPreviewUrl && localPreviewUrl.startsWith("blob:")) {
+        URL.revokeObjectURL(localPreviewUrl);
+      }
+    };
+  }, [localPreviewUrl]);
+
+  async function uploadMediaFile(file) {
+    if (!file) throw new Error("No file selected.");
+    if (!API_BASE) throw new Error("Missing VITE_API_BASE");
+    if (!workspaceId) throw new Error("Select workspace first.");
+
+    const token = getAccessToken();
+    if (!token) throw new Error("Missing access token.");
+
+    const form = new FormData();
+    form.append("file", file);
+    form.append("workspaceId", workspaceId);
+
+    const res = await fetch(`${API_BASE}/api/uploads`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+      body: form,
+    });
+
+    const isJson = (res.headers.get("content-type") || "").includes("application/json");
+    const payload = isJson ? await res.json() : await res.text();
+
+    if (!res.ok) {
+      const msg =
+        (payload && typeof payload === "object" && (payload.message || payload.error)) ||
+        (typeof payload === "string" ? payload : "") ||
+        `Upload failed: ${res.status}`;
+      throw new Error(msg);
+    }
+
+    return payload;
+  }
+
+  async function handleChooseFile(file) {
+    try {
+      if (!file) return;
+
+      setErr("");
+
+      if (postType === "image" && !isImageFile(file)) {
+        throw new Error("Selected file is not an image.");
+      }
+
+      if (postType === "video" && !isVideoFile(file)) {
+        throw new Error("Selected file is not a video.");
+      }
+
+      if (!isImageFile(file) && !isVideoFile(file)) {
+        throw new Error("Only image or video files are supported.");
+      }
+
+      if (localPreviewUrl && localPreviewUrl.startsWith("blob:")) {
+        URL.revokeObjectURL(localPreviewUrl);
+      }
+
+      const preview = URL.createObjectURL(file);
+      setLocalFile(file);
+      setLocalPreviewUrl(preview);
+      setUploadedMediaUrl("");
+      setUploadedMediaKind(isVideoFile(file) ? "video" : "image");
+      setUploadMeta(null);
+
+      setUploading(true);
+      const uploaded = await uploadMediaFile(file);
+
+      const publicUrl =
+        uploaded?.url ||
+        uploaded?.public_url ||
+        uploaded?.file_url ||
+        "";
+
+      if (!publicUrl) {
+        throw new Error("Upload succeeded but no public URL returned.");
+      }
+
+      setUploadedMediaUrl(String(publicUrl));
+      setUploadMeta(uploaded);
+    } catch (e) {
+      setErr(String(e?.message || e));
+      alert(String(e?.message || e));
+    } finally {
+      setUploading(false);
+    }
+  }
+
   async function createPost(action) {
     if (!workspaceId) throw new Error("Select workspace.");
     if (!selectedChannelIds.size) throw new Error("Select at least one page/account.");
 
-    if (needsIgImage && !imageUrl) {
-      throw new Error("Instagram feed publishing requires an Image URL (public HTTPS).");
-    }
-
-    if (imageUrl && !/^https?:\/\//i.test(imageUrl)) {
-      throw new Error("Image URL must start with http:// or https://");
-    }
-
     if (postType === "link" && linkUrl && !/^https?:\/\//i.test(linkUrl)) {
       throw new Error("Link URL must start with http:// or https://");
+    }
+
+    if (requiresMedia && !composerMediaUrl) {
+      throw new Error("Please upload an image or video first.");
+    }
+
+    if (hasInstagramSelected && !composerMediaUrl) {
+      throw new Error("Instagram publishing requires uploaded media.");
+    }
+
+    if (postType === "image" && uploadedMediaKind && uploadedMediaKind !== "image") {
+      throw new Error("Image post selected but uploaded file is not an image.");
+    }
+
+    if (postType === "video" && uploadedMediaKind && uploadedMediaKind !== "video") {
+      throw new Error("Video post selected but uploaded file is not a video.");
     }
 
     if (action === "scheduled") {
@@ -208,7 +346,7 @@ export default function Publisher({ theme, setTheme }) {
       content_type: postType,
       text,
       link_url: postType === "link" ? linkUrl : "",
-      media_urls: imageUrl ? [imageUrl] : [],
+      media_urls: composerMediaUrl ? [composerMediaUrl] : [],
       scheduled_at: action === "scheduled" ? buildScheduledISO() : null,
       channel_ids: Array.from(selectedChannelIds),
     };
@@ -223,24 +361,32 @@ export default function Publisher({ theme, setTheme }) {
   }
 
   function resetComposer() {
+    if (localPreviewUrl && localPreviewUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(localPreviewUrl);
+    }
+
     setPostType("text");
     setText("");
     setLinkUrl("");
-    setImageUrl("");
-    setAssets([]);
     setDate("");
     setTime("");
     setScheduleOn(true);
     setSelectedChannelIds(new Set());
     setErr("");
+
+    setLocalFile(null);
+    setLocalPreviewUrl("");
+    setUploadedMediaUrl("");
+    setUploadedMediaKind("");
+    setUploadMeta(null);
+
+    if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
   const previewText =
     text?.trim() ||
     (postType === "link" && linkUrl ? `Check this out: ${linkUrl}` : "") ||
     "Write something to preview…";
-
-  const previewImage = imageUrl || assets?.[0] || "";
 
   async function handlePrimaryAction() {
     try {
@@ -339,17 +485,6 @@ export default function Publisher({ theme, setTheme }) {
           </div>
 
           <div className="flex items-center gap-4">
-            <div className="relative hidden md:block">
-              <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-lg">
-                search
-              </span>
-              <input
-                className="bg-black/30 border border-white/5 rounded-xl pl-10 pr-4 py-2 text-sm focus:ring-1 focus:ring-primary focus:border-primary outline-none w-64 text-slate-200"
-                placeholder="Search assets..."
-                type="text"
-              />
-            </div>
-
             <button
               type="button"
               onClick={resetComposer}
@@ -438,9 +573,15 @@ export default function Publisher({ theme, setTheme }) {
                 </div>
               ) : null}
 
-              {needsIgImage ? (
+              {hasInstagramSelected ? (
                 <div className="mt-3 text-[11px] text-amber-300 font-bold">
-                  Instagram selected → Image URL is required.
+                  Instagram selected → uploaded media required.
+                </div>
+              ) : null}
+
+              {hasFacebookSelected ? (
+                <div className="mt-1 text-[11px] text-slate-500">
+                  Facebook supports text, link, image, and video.
                 </div>
               ) : null}
             </div>
@@ -457,22 +598,18 @@ export default function Publisher({ theme, setTheme }) {
                   { key: "link", icon: "link", label: "Link" },
                 ].map((t) => {
                   const active = postType === t.key;
-                  const disabled = t.key === "video";
                   return (
                     <button
                       key={t.key}
                       type="button"
-                      disabled={disabled}
                       onClick={() => setPostType(t.key)}
                       className={cn(
                         "flex flex-col items-center justify-center gap-2 p-4 rounded-xl border transition-all",
                         "bg-white/3 backdrop-blur-md",
                         active
                           ? "border-primary/30 bg-primary/10 text-primary"
-                          : "border-transparent hover:border-primary/20 text-slate-400",
-                        disabled ? "opacity-40 cursor-not-allowed" : ""
+                          : "border-transparent hover:border-primary/20 text-slate-400"
                       )}
-                      title={disabled ? "Video posting not enabled yet" : ""}
                     >
                       <span className="material-symbols-outlined">{t.icon}</span>
                       <span className="text-[10px] font-bold uppercase">{t.label}</span>
@@ -499,15 +636,9 @@ export default function Publisher({ theme, setTheme }) {
 
                 <div className="px-6 py-4 border-t border-white/5 flex items-center justify-between bg-white/2">
                   <div className="flex items-center gap-4">
-                    <span className="material-symbols-outlined text-slate-500 hover:text-primary cursor-pointer transition-colors">
-                      sentiment_satisfied
-                    </span>
-                    <span className="material-symbols-outlined text-slate-500 hover:text-primary cursor-pointer transition-colors">
-                      location_on
-                    </span>
-                    <span className="material-symbols-outlined text-slate-500 hover:text-primary cursor-pointer transition-colors">
-                      tag
-                    </span>
+                    <span className="material-symbols-outlined text-slate-500">sentiment_satisfied</span>
+                    <span className="material-symbols-outlined text-slate-500">location_on</span>
+                    <span className="material-symbols-outlined text-slate-500">tag</span>
                   </div>
 
                   <div className="flex items-center gap-1.5 text-[10px] font-bold text-slate-500">
@@ -533,65 +664,66 @@ export default function Publisher({ theme, setTheme }) {
 
             <div className="mb-8">
               <h3 className="text-sm font-bold uppercase tracking-widest text-primary mb-4">
-                Media Assets
+                Media Upload
               </h3>
 
-              <div
-                className="border-2 border-dashed border-primary/20 rounded-2xl p-8 flex flex-col items-center justify-center gap-3 bg-primary/5 hover:bg-primary/10 transition-all cursor-pointer"
-                onClick={() => {
-                  const url = prompt("Paste a public HTTPS image URL to add as an asset:");
-                  if (url && /^https?:\/\//i.test(url)) {
-                    setAssets((prev) => [url, ...prev].slice(0, 6));
-                    setImageUrl((prev) => prev || url);
-                  }
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*,video/*"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) handleChooseFile(file);
                 }}
+              />
+
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="w-full border-2 border-dashed border-primary/20 rounded-2xl p-8 flex flex-col items-center justify-center gap-3 bg-primary/5 hover:bg-primary/10 transition-all"
               >
                 <span className="material-symbols-outlined text-3xl text-primary">
                   cloud_upload
                 </span>
                 <p className="text-sm font-medium text-slate-300">
-                  Drag files or <span className="text-primary">browse</span>
+                  Click to upload image or video
                 </p>
-                <p className="text-[10px] text-slate-500">Supports JPG, PNG, MP4 (Max 50MB)</p>
-              </div>
+                <p className="text-[10px] text-slate-500">
+                  Supports JPG, PNG, WEBP, MP4, MOV
+                </p>
+              </button>
 
-              <div className="mt-4">
-                <p className="text-[10px] font-bold text-slate-500 uppercase tracking-tighter mb-2">
-                  Image URL {needsIgImage ? "(required for Instagram)" : "(optional)"}
-                </p>
-                <input
-                  value={imageUrl}
-                  onChange={(e) => setImageUrl(e.target.value)}
-                  placeholder="https://yourcdn.com/image.jpg"
-                  className="w-full bg-black/30 border border-white/5 rounded-2xl px-4 py-3 text-sm text-slate-200 focus:ring-1 focus:ring-primary focus:border-primary outline-none"
-                />
-                <p className="mt-2 text-[11px] text-slate-500">
-                  Must be a public HTTPS image URL so Meta can fetch it.
-                </p>
-              </div>
-
-              <div className="grid grid-cols-3 gap-4 mt-4">
-                {(assets.length ? assets : imageUrl ? [imageUrl] : []).slice(0, 2).map((u) => (
-                  <div key={u} className="aspect-square rounded-xl overflow-hidden relative group">
-                    <img className="w-full h-full object-cover" alt="Asset" src={u} />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAssets((prev) => prev.filter((x) => x !== u));
-                        if (imageUrl === u) setImageUrl("");
-                      }}
-                      className="absolute top-2 right-2 size-6 bg-red-500 text-white rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                      title="Remove"
-                    >
-                      <span className="material-symbols-outlined text-sm">close</span>
-                    </button>
+              {localFile ? (
+                <div className="mt-4 rounded-2xl border border-white/5 bg-white/3 p-4">
+                  <div className="text-sm text-slate-200 font-semibold truncate">
+                    {localFile.name}
                   </div>
-                ))}
-
-                <div className="aspect-square rounded-xl overflow-hidden border border-white/5 flex items-center justify-center bg-black/30">
-                  <span className="material-symbols-outlined text-slate-700">add</span>
+                  <div className="mt-1 text-[11px] text-slate-500">
+                    {(localFile.size / (1024 * 1024)).toFixed(2)} MB • {localFile.type || "unknown"}
+                  </div>
+                  <div className="mt-2 text-[11px]">
+                    {uploading ? (
+                      <span className="text-amber-300 font-bold">Uploading...</span>
+                    ) : uploadedMediaUrl ? (
+                      <span className="text-primary font-bold">Uploaded successfully</span>
+                    ) : null}
+                  </div>
                 </div>
-              </div>
+              ) : null}
+
+              {uploadedMediaUrl ? (
+                <div className="mt-4">
+                  <p className="text-[10px] font-bold text-slate-500 uppercase tracking-tighter mb-2">
+                    Uploaded Public URL
+                  </p>
+                  <input
+                    value={uploadedMediaUrl}
+                    readOnly
+                    className="w-full bg-black/30 border border-white/5 rounded-2xl px-4 py-3 text-sm text-slate-300 outline-none"
+                  />
+                </div>
+              ) : null}
             </div>
 
             <div className="mb-8">
@@ -655,16 +787,20 @@ export default function Publisher({ theme, setTheme }) {
               <button
                 type="button"
                 onClick={handlePrimaryAction}
-                disabled={submitting}
+                disabled={submitting || uploading}
                 className="flex-1 py-4 px-6 bg-primary text-background-dark font-bold rounded-2xl hover:brightness-110 transition-all shadow-lg shadow-primary/20 disabled:opacity-60"
               >
-                {submitting ? "Please wait..." : scheduleOn ? "Schedule Post" : "Publish Now"}
+                {submitting || uploading
+                  ? "Please wait..."
+                  : scheduleOn
+                  ? "Schedule Post"
+                  : "Publish Now"}
               </button>
 
               <button
                 type="button"
                 onClick={handleSaveDraft}
-                disabled={submitting}
+                disabled={submitting || uploading}
                 className="py-4 px-6 bg-white/3 backdrop-blur-md rounded-2xl font-bold hover:bg-white/5 transition-all border border-white/5 text-slate-100 disabled:opacity-60"
               >
                 Save Draft
@@ -735,7 +871,7 @@ export default function Publisher({ theme, setTheme }) {
 
               {topTab === "sent" ? (
                 <div className="bg-white/3 border border-white/5 rounded-2xl p-4 text-slate-500 text-sm">
-                  Published list endpoint abhi backend mein add karna hoga. Filhal publish action working hone ke baad is tab ko next step mein wire karenge.
+                  Published list endpoint abhi backend mein add karna hoga. Filhal publish action ke baad next step mein wire karenge.
                 </div>
               ) : null}
             </div>
@@ -761,13 +897,6 @@ export default function Publisher({ theme, setTheme }) {
                   title="Instagram preview"
                 >
                   <span className="material-symbols-outlined text-sm">photo_camera</span>
-                </button>
-                <button
-                  type="button"
-                  className="size-8 rounded-lg bg-white/3 border border-white/5 text-slate-400 flex items-center justify-center hover:text-primary transition-colors"
-                  title="Messenger preview"
-                >
-                  <span className="material-symbols-outlined text-sm">forum</span>
                 </button>
               </div>
             </div>
@@ -799,12 +928,24 @@ export default function Publisher({ theme, setTheme }) {
                 </p>
               </div>
 
-              <div className="mt-12 w-full max-w-lg flex flex-col gap-4">
-                {previewImage ? (
-                  <img className="w-full h-full object-cover" alt="Preview media" src={previewImage} />
+              <div className="mt-6 w-full">
+                {composerMediaPreview ? (
+                  uploadedMediaKind === "video" ? (
+                    <video
+                      className="w-full max-h-[420px] object-cover bg-black"
+                      controls
+                      src={composerMediaPreview}
+                    />
+                  ) : (
+                    <img
+                      className="w-full max-h-[420px] object-cover"
+                      alt="Preview media"
+                      src={composerMediaPreview}
+                    />
+                  )
                 ) : (
-                  <div className="w-full h-full flex items-center justify-center text-slate-600 text-sm">
-                    No image selected
+                  <div className="h-64 flex items-center justify-center text-slate-600 text-sm bg-black/20">
+                    No media selected
                   </div>
                 )}
               </div>
@@ -866,6 +1007,12 @@ export default function Publisher({ theme, setTheme }) {
                   <p className="text-lg font-bold text-primary">09:30 AM</p>
                 </div>
               </div>
+
+              {uploadMeta ? (
+                <div className="bg-white/3 border border-white/5 p-4 rounded-xl text-xs text-slate-400">
+                  Upload ready for publish.
+                </div>
+              ) : null}
             </div>
           </section>
         </div>

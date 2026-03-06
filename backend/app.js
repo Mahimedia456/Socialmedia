@@ -1,4 +1,3 @@
-// backend/app.js
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -11,6 +10,7 @@ import path from "path";
 import { fileURLToPath } from "url";
 import nodemailer from "nodemailer";
 import crypto from "crypto";
+import multer from "multer";
 
 /* ---------------- Load .env (absolute path; Windows safe) ---------------- */
 const __filename = fileURLToPath(import.meta.url);
@@ -41,7 +41,7 @@ const META_VERIFY_TOKEN =
   "";
 
 const META_GRAPH_VERSION = process.env.META_GRAPH_VERSION || "v19.0";
-
+const STORAGE_BUCKET = process.env.STORAGE_BUCKET || "publisher-media";
 if (!ACCESS_SECRET || !REFRESH_SECRET || !RESET_SECRET) {
   throw new Error(
     "Missing ACCESS_TOKEN_SECRET / REFRESH_TOKEN_SECRET / RESET_TOKEN_SECRET in backend/.env"
@@ -92,9 +92,6 @@ app.set("trust proxy", 1);
 
 /* ============================================================
    ✅ CORS FIX (Vercel + localhost + custom)
-   - Do NOT throw errors from CORS callback (breaks preflight)
-   - Allow *.vercel.app
-   - Allow explicit CORS_ORIGINS list
 ============================================================ */
 function isAllowedOrigin(origin) {
   if (!origin) return true; // same-origin / server-side / Postman
@@ -113,7 +110,6 @@ function isAllowedOrigin(origin) {
 app.use(
   cors({
     origin: (origin, cb) => {
-      // IMPORTANT: never throw, just allow/deny by boolean
       if (isAllowedOrigin(origin)) return cb(null, true);
       return cb(null, false);
     },
@@ -123,7 +119,7 @@ app.use(
   })
 );
 
-// ✅ Ensure preflight always returns headers (fixes Vercel browser failures)
+// ✅ Ensure preflight always returns headers
 app.options("*", cors());
 
 app.use(helmet());
@@ -132,7 +128,13 @@ app.use(helmet());
 app.use("/api/meta/webhook", express.raw({ type: "application/json" }));
 app.use("/api/webhooks/meta", express.raw({ type: "application/json" }));
 
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "20mb" }));
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 50 * 1024 * 1024, // 50MB
+  },
+});
 app.use(cookieParser());
 
 // request log
@@ -191,22 +193,23 @@ function upsertThreadInMemory(workspaceId, thread) {
   return ws.threads.get(thread.id);
 }
 
+function makeMemoryMessageKey(message) {
+  return message.external_message_id
+    ? `ext:${String(message.external_message_id)}`
+    : message.id
+    ? `id:${String(message.id)}`
+    : `f:${String(message.direction)}:${String(message.sent_at)}:${String(
+        message.text
+      )}`;
+}
+
 function upsertMessageInMemory(workspaceId, threadId, message) {
   const ws = getWsStore(workspaceId);
   if (!ws) return null;
   ws.updatedAt = Date.now();
   if (!ws.messages.has(threadId)) ws.messages.set(threadId, new Map());
   const bucket = ws.messages.get(threadId);
-
-  const key =
-    message.external_message_id
-      ? `ext:${String(message.external_message_id)}`
-      : message.id
-      ? `id:${String(message.id)}`
-      : `f:${String(message.direction)}:${String(message.sent_at)}:${String(
-          message.text
-        )}`;
-
+  const key = makeMemoryMessageKey(message);
   bucket.set(key, { ...bucket.get(key), ...message });
   return bucket.get(key);
 }
@@ -235,8 +238,9 @@ function sseWrite(res, eventName, data) {
 
 function addSseClient(workspaceId, res) {
   const wsId = String(workspaceId || "");
-  if (!sseClientsByWorkspace.has(wsId))
+  if (!sseClientsByWorkspace.has(wsId)) {
     sseClientsByWorkspace.set(wsId, new Set());
+  }
   sseClientsByWorkspace.get(wsId).add(res);
 }
 
@@ -291,6 +295,113 @@ function verifyReset(token) {
 function isGlobalAdmin(role) {
   const r = String(role || "").toLowerCase();
   return r === "owner" || r === "admin";
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function sanitizeFileName(name) {
+  return String(name || "file")
+    .replace(/[^\w.\-]+/g, "_")
+    .replace(/_+/g, "_")
+    .slice(-180);
+}
+
+function fileExtFromName(name) {
+  const base = String(name || "");
+  const idx = base.lastIndexOf(".");
+  if (idx === -1) return "";
+  return base.slice(idx).toLowerCase();
+}
+
+function inferMediaKindFromMime(mime) {
+  const m = String(mime || "").toLowerCase();
+  if (m.startsWith("image/")) return "image";
+  if (m.startsWith("video/")) return "video";
+  return "unknown";
+}
+
+async function ensureStorageBucketExists() {
+  const { data, error } = await supabase.storage.getBucket(STORAGE_BUCKET);
+
+  if (!error && data) return data;
+
+  const { data: created, error: createErr } = await supabase.storage.createBucket(
+    STORAGE_BUCKET,
+    {
+      public: true,
+      fileSizeLimit: 50 * 1024 * 1024,
+      allowedMimeTypes: [
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "image/jpg",
+        "video/mp4",
+        "video/quicktime",
+        "video/webm",
+        "video/x-m4v",
+      ],
+    }
+  );
+
+  if (createErr) {
+    // ignore already exists style failures
+    const msg = String(createErr?.message || "").toLowerCase();
+    if (!msg.includes("already")) throw createErr;
+  }
+
+  return created || null;
+}
+
+async function uploadPublisherFileToStorage({
+  workspaceId,
+  userId,
+  file,
+}) {
+  if (!file?.buffer) throw new Error("File buffer missing");
+
+  await ensureStorageBucketExists();
+
+  const safeName = sanitizeFileName(file.originalname || "upload");
+  const ext = fileExtFromName(safeName);
+  const kind = inferMediaKindFromMime(file.mimetype);
+
+  if (kind === "unknown") {
+    throw new Error("Only image and video files are supported.");
+  }
+
+  const objectPath =
+    `${workspaceId}/${userId}/${Date.now()}_${crypto.randomUUID()}${ext}`;
+
+  const { error: uploadErr } = await supabase.storage
+    .from(STORAGE_BUCKET)
+    .upload(objectPath, file.buffer, {
+      contentType: file.mimetype || "application/octet-stream",
+      cacheControl: "3600",
+      upsert: false,
+    });
+
+  if (uploadErr) throw uploadErr;
+
+  const { data: publicData } = supabase.storage
+    .from(STORAGE_BUCKET)
+    .getPublicUrl(objectPath);
+
+  const publicUrl = String(publicData?.publicUrl || "");
+
+  if (!publicUrl) {
+    throw new Error("Failed to generate public URL for uploaded file.");
+  }
+
+  return {
+    bucket: STORAGE_BUCKET,
+    path: objectPath,
+    url: publicUrl,
+    kind,
+    contentType: file.mimetype || "",
+    size: Number(file.size || 0),
+    originalName: file.originalname || safeName,
+  };
 }
 
 /* ---------------- Email (DEV or SMTP) ---------------- */
@@ -925,7 +1036,53 @@ async function sendInstagramMessage({ igUserId, token, recipientId, text }) {
   }
   return j;
 }
+async function fetchFacebookFeedAnalytics({ pageId, pageToken, limit = 50 }) {
+  const url = new URL(
+    `https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/posts`
+  );
 
+  url.searchParams.set(
+    "fields",
+    [
+      "id",
+      "message",
+      "created_time",
+      "permalink_url",
+      "likes.summary(true).limit(0)",
+      "comments.summary(true).limit(0)",
+      "shares",
+    ].join(",")
+  );
+  url.searchParams.set("limit", String(limit));
+  url.searchParams.set("access_token", pageToken);
+
+  return metaGet(url.toString());
+}
+
+async function fetchInstagramMediaAnalytics({ igUserId, token, limit = 50 }) {
+  const url = new URL(
+    `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media`
+  );
+
+  url.searchParams.set(
+    "fields",
+    [
+      "id",
+      "caption",
+      "media_type",
+      "media_url",
+      "thumbnail_url",
+      "permalink",
+      "timestamp",
+      "like_count",
+      "comments_count",
+    ].join(",")
+  );
+  url.searchParams.set("limit", String(limit));
+  url.searchParams.set("access_token", token);
+
+  return metaGet(url.toString());
+}
 /* ================= META WEBHOOK HELPERS ================= */
 
 // Optional: verify X-Hub-Signature-256 if META_APP_SECRET is set.
@@ -1064,6 +1221,467 @@ app.get("/api/health", (req, res) =>
 );
 
 /* ============================================================
+   INBOX AUTO-SYNC HELPERS
+============================================================ */
+
+async function listUserWorkspaceIdsForAutoSync({ userId, role }) {
+  if (isGlobalAdmin(role)) {
+    const { data, error } = await supabase
+      .from(T_WORKSPACES)
+      .select("id");
+    if (error) throw error;
+    return (data || []).map((r) => String(r.id));
+  }
+
+  const { data, error } = await supabase
+    .from(T_WSM)
+    .select("workspace_id")
+    .eq("user_id", userId)
+    .eq("status", "active");
+
+  if (error) throw error;
+  return (data || []).map((r) => String(r.workspace_id));
+}
+
+async function syncMetaInboxToMemory({ workspaceId }) {
+  const provider = providerMeta();
+  const igErrors = [];
+
+  // ---------- FB Pages ----------
+  const { data: fbPages, error: fbErr } = await supabase
+    .from(T_CHANNELS)
+    .select("id,external_id,display_name,platform,provider,status,meta")
+    .eq("workspace_id", workspaceId)
+    .eq("provider", provider)
+    .eq("platform", "facebook")
+    .eq("status", CHANNEL_STATUS_CONNECTED);
+
+  if (fbErr) throw fbErr;
+
+  let threadsUpserted = 0;
+  let messagesUpserted = 0;
+
+  for (const ch of fbPages || []) {
+    const pageId = String(ch.external_id);
+    const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
+    if (!pageToken) continue;
+
+    const convos = await fetchAllPageConversations({
+      pageId,
+      pageToken,
+      maxConvos: 500,
+    });
+
+    for (const c of convos) {
+      const externalThreadId = String(c.id);
+      const updated = c.updated_time
+        ? new Date(c.updated_time).toISOString()
+        : new Date().toISOString();
+      const snippet = String(c.snippet || "").slice(0, 200);
+
+      const participants = c?.participants?.data || [];
+      const other =
+        participants.find((p) => String(p?.id || "") !== String(pageId)) ||
+        participants[0] ||
+        null;
+
+      const participantExternalId = other?.id ? String(other.id) : null;
+      const participantName = other?.name ? String(other.name) : "Messenger User";
+
+      const threadId = buildThreadId({
+        provider,
+        platform: "facebook",
+        channelExternalId: pageId,
+        externalThreadId,
+      });
+
+      const thread = upsertThreadInMemory(workspaceId, {
+        id: threadId,
+        workspace_id: workspaceId,
+        provider,
+        platform: "facebook",
+        channel_id: ch.id,
+        channel: {
+          id: ch.id,
+          display_name: ch.display_name,
+          external_id: pageId,
+          platform: "facebook",
+          provider,
+        },
+        external_thread_id: externalThreadId,
+        participant_external_id: participantExternalId,
+        participant_name: participantName,
+        participant_username: null,
+        last_message_at: updated,
+        last_message_snippet: snippet,
+        status: "open",
+        unread_count: 0,
+        updated_at: new Date().toISOString(),
+      });
+
+      threadsUpserted += 1;
+      emitToWorkspace(workspaceId, "thread_upsert", thread);
+
+      const msgs = await fetchAllConversationMessages({
+        conversationId: externalThreadId,
+        pageToken,
+        maxMsgs: 500,
+      });
+
+      let latestText = "";
+
+      for (const m of msgs || []) {
+        const mid = String(m.id);
+        const created = m.created_time
+          ? new Date(m.created_time).toISOString()
+          : new Date().toISOString();
+
+        const fromId = m?.from?.id ? String(m.from.id) : null;
+        const fromName = m?.from?.name ? String(m.from.name) : null;
+        const text = normalizeText(m.message);
+
+        const direction =
+          fromId && String(fromId) === String(pageId) ? "outbound" : "inbound";
+
+        if (text) latestText = text;
+
+        const msg = upsertMessageInMemory(workspaceId, threadId, {
+          id: `mem_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          channel_id: ch.id,
+          provider,
+          platform: "facebook",
+          external_message_id: mid,
+          direction,
+          sender_external_id: fromId,
+          sender_name: fromName,
+          message_type: "text",
+          text,
+          sent_at: created,
+          meta: {},
+        });
+
+        messagesUpserted += 1;
+        emitToWorkspace(workspaceId, "message_upsert", msg);
+      }
+
+      if (latestText) {
+        const t2 = upsertThreadInMemory(workspaceId, {
+          ...thread,
+          last_message_snippet: latestText.slice(0, 200),
+          updated_at: new Date().toISOString(),
+        });
+        emitToWorkspace(workspaceId, "thread_upsert", t2);
+      }
+    }
+  }
+
+  // ---------- Instagram ----------
+  const { data: igAccounts, error: igErr } = await supabase
+    .from(T_CHANNELS)
+    .select("id,external_id,display_name,platform,provider,status,meta")
+    .eq("workspace_id", workspaceId)
+    .eq("provider", provider)
+    .eq("platform", "instagram")
+    .eq("status", CHANNEL_STATUS_CONNECTED);
+
+  if (igErr) throw igErr;
+
+  let igThreadsUpserted = 0;
+  let igMessagesUpserted = 0;
+
+  for (const igCh of igAccounts || []) {
+    const igUserId = String(igCh.external_id);
+    const pageIdForIg = String(igCh?.meta?.page_id || "");
+
+    const igToken = await getTokenFromDB({
+      workspaceId,
+      externalId: igUserId,
+      token_type: "page",
+    });
+
+    if (!igToken) continue;
+
+    let convos = [];
+    let usedFallback = false;
+
+    try {
+      convos = await fetchAllIgConversations({
+        igUserId,
+        token: igToken,
+        maxConvos: 200,
+      });
+    } catch (e1) {
+      try {
+        if (!pageIdForIg) {
+          throw new Error("IG channel meta.page_id missing (needed for fallback)");
+        }
+
+        convos = await fetchAllPageConversations({
+          pageId: pageIdForIg,
+          pageToken: igToken,
+          maxConvos: 200,
+          platform: "instagram",
+        });
+
+        usedFallback = true;
+      } catch (e2) {
+        const code = e1?.meta?.code || e1?.meta?.error?.code || null;
+        igErrors.push({
+          igUserId,
+          message: e1?.message || "IG conversations fetch failed",
+          meta: e1?.meta || null,
+          hint:
+            Number(code) === 10 || Number(code) === 200
+              ? "Missing permissions/scopes for Instagram Messaging."
+              : Number(code) === 3
+              ? "Endpoint unsupported: Instagram Messaging product not enabled or app review missing."
+              : "Check IG professional account + connected page + app mode + permissions.",
+          fallback_error: { message: e2?.message || "Fallback failed" },
+        });
+        continue;
+      }
+    }
+
+    for (const c of convos || []) {
+      const externalThreadId = String(c.id);
+      const updated = c.updated_time
+        ? new Date(c.updated_time).toISOString()
+        : new Date().toISOString();
+
+      const participants = c?.participants?.data || [];
+      const other = participants?.[0] || null;
+
+      const participantExternalId = other?.id ? String(other.id) : null;
+      const participantName =
+        other?.username || other?.name
+          ? String(other.username || other.name)
+          : "IG User";
+
+      const threadId = buildThreadId({
+        provider,
+        platform: "instagram",
+        channelExternalId: igUserId,
+        externalThreadId,
+      });
+
+      const thread = upsertThreadInMemory(workspaceId, {
+        id: threadId,
+        workspace_id: workspaceId,
+        provider,
+        platform: "instagram",
+        channel_id: igCh.id,
+        channel: {
+          id: igCh.id,
+          display_name: igCh.display_name,
+          external_id: igUserId,
+          platform: "instagram",
+          provider,
+        },
+        external_thread_id: externalThreadId,
+        participant_external_id: participantExternalId,
+        participant_name: participantName,
+        participant_username: other?.username ? String(other.username) : null,
+        last_message_at: updated,
+        last_message_snippet: "",
+        status: "open",
+        unread_count: 0,
+        updated_at: new Date().toISOString(),
+      });
+
+      igThreadsUpserted += 1;
+      emitToWorkspace(workspaceId, "thread_upsert", thread);
+
+      let msgs = [];
+      try {
+        msgs = await fetchAllIgMessages({
+          conversationId: externalThreadId,
+          token: igToken,
+          maxMsgs: 200,
+        });
+      } catch (e) {
+        igErrors.push({
+          igUserId,
+          conversationId: externalThreadId,
+          message: e?.message || "IG messages fetch failed",
+          meta: e?.meta || null,
+        });
+        continue;
+      }
+
+      let latestText = "";
+
+      for (const m of msgs || []) {
+        const mid = String(m.id);
+        const created = m.created_time
+          ? new Date(m.created_time).toISOString()
+          : new Date().toISOString();
+
+        const fromId = m?.from?.id ? String(m.from.id) : null;
+        const fromName =
+          m?.from?.username || m?.from?.name
+            ? String(m.from.username || m.from.name)
+            : null;
+        const text = normalizeText(m.message);
+
+        const direction =
+          fromId &&
+          (String(fromId) === String(igUserId) ||
+            (pageIdForIg && String(fromId) === String(pageIdForIg)))
+            ? "outbound"
+            : "inbound";
+
+        if (text) latestText = text;
+
+        const msg = upsertMessageInMemory(workspaceId, threadId, {
+          id: `mem_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+          workspace_id: workspaceId,
+          thread_id: threadId,
+          channel_id: igCh.id,
+          provider,
+          platform: "instagram",
+          external_message_id: mid,
+          direction,
+          sender_external_id: fromId,
+          sender_name: fromName,
+          message_type: "text",
+          text,
+          sent_at: created,
+          meta: { usedFallback },
+        });
+
+        igMessagesUpserted += 1;
+        emitToWorkspace(workspaceId, "message_upsert", msg);
+      }
+
+      if (latestText) {
+        const t2 = upsertThreadInMemory(workspaceId, {
+          ...thread,
+          last_message_snippet: latestText.slice(0, 200),
+          updated_at: new Date().toISOString(),
+        });
+        emitToWorkspace(workspaceId, "thread_upsert", t2);
+      }
+    }
+  }
+
+  return {
+    ok: true,
+    threads_upserted: threadsUpserted,
+    messages_upserted: messagesUpserted,
+    ig_threads_upserted: igThreadsUpserted,
+    ig_messages_upserted: igMessagesUpserted,
+    ig_errors: igErrors,
+    storage: "memory",
+  };
+}
+
+async function runLoginAutoSyncInBackground({ userId, role }) {
+  try {
+    const workspaceIds = await listUserWorkspaceIdsForAutoSync({ userId, role });
+
+    console.log("AUTO_SYNC_START", {
+      user_id: userId,
+      workspaces: workspaceIds,
+    });
+
+    for (const wsId of workspaceIds) {
+      try {
+        const result = await syncMetaInboxToMemory({ workspaceId: wsId });
+        console.log("AUTO_SYNC_DONE", {
+          workspace_id: wsId,
+          threads_upserted: result?.threads_upserted || 0,
+          messages_upserted: result?.messages_upserted || 0,
+          ig_threads_upserted: result?.ig_threads_upserted || 0,
+          ig_messages_upserted: result?.ig_messages_upserted || 0,
+          ig_errors: result?.ig_errors || [],
+        });
+      } catch (e) {
+        console.error("AUTO_SYNC_WS_FAILED", {
+          workspace_id: wsId,
+          message: e?.message || "Auto sync failed",
+          meta: e?.meta || null,
+        });
+      }
+    }
+
+    console.log("AUTO_SYNC_FINISHED", { user_id: userId });
+  } catch (e) {
+    console.error("AUTO_SYNC_DISCOVERY_FAILED", {
+      user_id: userId,
+      message: e?.message || "Auto sync discovery failed",
+      meta: e?.meta || null,
+    });
+  }
+}
+
+/* ============================================================
+   MEDIA PUBLISH HELPERS
+============================================================ */
+
+function guessMediaKindFromUrl(url) {
+  const s = String(url || "").toLowerCase().split("?")[0];
+  if (
+    s.endsWith(".mp4") ||
+    s.endsWith(".mov") ||
+    s.endsWith(".m4v") ||
+    s.endsWith(".webm")
+  ) {
+    return "video";
+  }
+  if (
+    s.endsWith(".jpg") ||
+    s.endsWith(".jpeg") ||
+    s.endsWith(".png") ||
+    s.endsWith(".webp")
+  ) {
+    return "image";
+  }
+  return "unknown";
+}
+
+async function waitForIgContainerReady({
+  creationId,
+  token,
+  timeoutMs = 120000,
+  intervalMs = 4000,
+}) {
+  const started = Date.now();
+
+  while (Date.now() - started < timeoutMs) {
+    const url = new URL(
+      `https://graph.facebook.com/${META_GRAPH_VERSION}/${creationId}`
+    );
+    url.searchParams.set("fields", "status_code,status,status_message");
+    url.searchParams.set("access_token", token);
+
+    const r = await fetch(url.toString());
+    const j = await r.json().catch(() => ({}));
+
+    if (!r.ok) {
+      const e = new Error(j?.error?.message || "IG container status check failed");
+      e.meta = j?.error || j;
+      throw e;
+    }
+
+    const statusCode = String(j?.status_code || j?.status || "").toUpperCase();
+
+    if (statusCode === "FINISHED" || statusCode === "PUBLISHED") {
+      return j;
+    }
+
+    if (statusCode === "ERROR" || statusCode === "EXPIRED") {
+      throw new Error(j?.status_message || `IG container failed: ${statusCode}`);
+    }
+
+    await sleep(intervalMs);
+  }
+
+  throw new Error("IG container processing timeout");
+}
+
+/* ============================================================
    META ANALYTICS HELPERS + API
 ============================================================ */
 async function fetchFacebookPostInsights({ postId, pageToken }) {
@@ -1092,111 +1710,212 @@ async function fetchFacebookPageInsights({ pageId, pageToken, since, until }) {
   return metaGet(url.toString());
 }
 
-app.get(
-  "/api/workspaces/:workspaceId/analytics/meta",
-  requireAuth,
-  requireWorkspaceAccess,
-  async (req, res, next) => {
-    try {
-      const { workspaceId } = req.params;
-      const days = Math.min(90, Math.max(1, Number(req.query.days || 30)));
+/* ============================================================
+   PUBLISHER HELPERS (META)
+============================================================ */
 
-      const since = Math.floor((Date.now() - days * 86400000) / 1000);
-      const until = Math.floor(Date.now() / 1000);
+async function publishFacebookPost({
+  pageId,
+  pageToken,
+  message,
+  link,
+  mediaUrl,
+}) {
+  const hasMedia = !!String(mediaUrl || "").trim();
+  const kind = guessMediaKindFromUrl(mediaUrl);
 
-      const provider = providerMeta();
+  // TEXT / LINK post
+  if (!hasMedia) {
+    const url = new URL(
+      `https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/feed`
+    );
 
-      const { data: channels, error } = await supabase
-        .from(T_CHANNELS)
-        .select("*")
-        .eq("workspace_id", workspaceId)
-        .eq("provider", provider)
-        .eq("status", CHANNEL_STATUS_CONNECTED);
+    const body = new URLSearchParams();
+    body.set("access_token", pageToken);
+    if (message) body.set("message", message);
+    if (link) body.set("link", link);
 
-      if (error) throw error;
+    const r = await fetch(url.toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
 
-      const analytics = {
-        impressions: 0,
-        engagement: 0,
-        followers: 0,
-        posts: [],
-      };
-
-      for (const ch of channels || []) {
-        if (ch.platform !== "facebook") continue;
-
-        const pageId = ch.external_id;
-
-        const token = await getPageTokenFromDB({
-          workspaceId,
-          pageId,
-        });
-
-        if (!token) continue;
-
-        const pageInsights = await fetchFacebookPageInsights({
-          pageId,
-          pageToken: token,
-          since,
-          until,
-        });
-
-        for (const metric of pageInsights?.data || []) {
-          const v = metric?.values?.[0]?.value || 0;
-          if (metric.name === "page_impressions") analytics.impressions += v;
-          if (metric.name === "page_engaged_users") analytics.engagement += v;
-          if (metric.name === "page_fans") analytics.followers = v;
-        }
-
-        const feedUrl = new URL(
-          `https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/posts`
-        );
-
-        feedUrl.searchParams.set(
-          "fields",
-          "id,message,created_time,permalink_url,likes.summary(true),comments.summary(true),shares"
-        );
-
-        feedUrl.searchParams.set("limit", "50");
-        feedUrl.searchParams.set("access_token", token);
-
-        const posts = await metaGet(feedUrl.toString());
-
-        for (const p of posts?.data || []) {
-          const likes = p?.likes?.summary?.total_count || 0;
-          const comments = p?.comments?.summary?.total_count || 0;
-          const shares = p?.shares?.count || 0;
-
-          const score = likes + comments + shares;
-
-          analytics.posts.push({
-            id: p.id,
-            message: p.message || "",
-            created_time: p.created_time,
-            permalink: p.permalink_url,
-            likes,
-            comments,
-            shares,
-            engagement_score: score,
-          });
-        }
-      }
-
-      analytics.posts.sort((a, b) => b.engagement_score - a.engagement_score);
-
-      res.json({
-        ok: true,
-        days,
-        impressions: analytics.impressions,
-        engagement: analytics.engagement,
-        followers: analytics.followers,
-        top_posts: analytics.posts.slice(0, 10),
-      });
-    } catch (e) {
-      next(e);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const e = new Error(j?.error?.message || "Facebook publish failed");
+      e.meta = j?.error || j;
+      throw e;
     }
+    return { kind: "feed", ...j };
   }
-);
+
+  // IMAGE post
+  if (kind === "image") {
+    const url = new URL(
+      `https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/photos`
+    );
+
+    const body = new URLSearchParams();
+    body.set("access_token", pageToken);
+    body.set("url", String(mediaUrl));
+    if (message) body.set("caption", message);
+
+    const r = await fetch(url.toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const e = new Error(j?.error?.message || "Facebook image publish failed");
+      e.meta = j?.error || j;
+      throw e;
+    }
+    return { kind: "photo", ...j };
+  }
+
+  // VIDEO post
+  if (kind === "video") {
+    const url = new URL(
+      `https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/videos`
+    );
+
+    const body = new URLSearchParams();
+    body.set("access_token", pageToken);
+    body.set("file_url", String(mediaUrl));
+    if (message) body.set("description", message);
+
+    const r = await fetch(url.toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const e = new Error(j?.error?.message || "Facebook video publish failed");
+      e.meta = j?.error || j;
+      throw e;
+    }
+    return { kind: "video", ...j };
+  }
+
+  throw new Error("Unsupported Facebook media URL. Use image or video direct URL.");
+}
+
+async function publishInstagramPost({ igUserId, token, caption, mediaUrl }) {
+  if (!mediaUrl) {
+    throw new Error("Instagram publishing requires mediaUrl.");
+  }
+
+  const kind = guessMediaKindFromUrl(mediaUrl);
+
+  // IMAGE post
+  if (kind === "image") {
+    const createUrl = new URL(
+      `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media`
+    );
+    createUrl.searchParams.set("access_token", token);
+
+    const r1 = await fetch(createUrl.toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        image_url: mediaUrl,
+        caption: caption || "",
+      }),
+    });
+
+    const j1 = await r1.json().catch(() => ({}));
+    if (!r1.ok) {
+      const e = new Error(j1?.error?.message || "IG create image container failed");
+      e.meta = j1?.error || j1;
+      throw e;
+    }
+
+    const creationId = j1?.id;
+    if (!creationId) throw new Error("IG image container returned no id");
+
+    const pubUrl = new URL(
+      `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media_publish`
+    );
+    pubUrl.searchParams.set("access_token", token);
+
+    const r2 = await fetch(pubUrl.toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ creation_id: creationId }),
+    });
+
+    const j2 = await r2.json().catch(() => ({}));
+    if (!r2.ok) {
+      const e = new Error(j2?.error?.message || "IG image publish failed");
+      e.meta = j2?.error || j2;
+      throw e;
+    }
+
+    return { kind: "image", creation_id: creationId, ...j2 };
+  }
+
+  // VIDEO -> publish as REEL
+  if (kind === "video") {
+    const createUrl = new URL(
+      `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media`
+    );
+    createUrl.searchParams.set("access_token", token);
+
+    const r1 = await fetch(createUrl.toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        media_type: "REELS",
+        video_url: mediaUrl,
+        caption: caption || "",
+      }),
+    });
+
+    const j1 = await r1.json().catch(() => ({}));
+    if (!r1.ok) {
+      const e = new Error(j1?.error?.message || "IG reel container create failed");
+      e.meta = j1?.error || j1;
+      throw e;
+    }
+
+    const creationId = j1?.id;
+    if (!creationId) throw new Error("IG reel container returned no id");
+
+    await waitForIgContainerReady({
+      creationId,
+      token,
+      timeoutMs: 120000,
+      intervalMs: 4000,
+    });
+
+    const pubUrl = new URL(
+      `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media_publish`
+    );
+    pubUrl.searchParams.set("access_token", token);
+
+    const r2 = await fetch(pubUrl.toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ creation_id: creationId }),
+    });
+
+    const j2 = await r2.json().catch(() => ({}));
+    if (!r2.ok) {
+      const e = new Error(j2?.error?.message || "IG reel publish failed");
+      e.meta = j2?.error || j2;
+      throw e;
+    }
+
+    return { kind: "reel", creation_id: creationId, ...j2 };
+  }
+
+  throw new Error("Unsupported Instagram media URL. Use direct image/video URL.");
+}
 
 /* ============================================================
    FEEDS APIs (READ-ONLY)
@@ -1279,7 +1998,6 @@ app.get(
 );
 
 // Instagram media feed (IG Graph API)
-// Instagram media feed (IG Graph API)
 app.get(
   "/api/workspaces/:workspaceId/feeds/instagram",
   requireAuth,
@@ -1316,20 +2034,11 @@ app.get(
         });
       }
 
-      // ✅ Support both old and new storage formats
-      // New format:
-      //   external_id = igUserId
-      //   meta.page_id = pageId
-      //
-      // Old format:
-      //   external_id = pageId
-      //   meta.ig_user_id = igUserId
-
+      // Support both old and new storage formats
       const pageIdFromMeta = String(ch?.meta?.page_id || "");
       const igUserIdFromMeta = String(ch?.meta?.ig_user_id || "");
       const externalId = String(ch.external_id || "");
 
-      // prefer real IG user id from meta, otherwise external_id
       const igUserId = igUserIdFromMeta || externalId;
 
       if (!igUserId) {
@@ -1339,7 +2048,6 @@ app.get(
         });
       }
 
-      // token may be stored against igUserId OR old pageId storage
       let token = await getTokenFromDB({
         workspaceId,
         externalId: igUserId,
@@ -1354,7 +2062,6 @@ app.get(
         });
       }
 
-      // very old row fallback: external_id may itself be pageId
       if (!token && externalId && externalId !== igUserId) {
         token = await getTokenFromDB({
           workspaceId,
@@ -1830,28 +2537,44 @@ app.post("/api/auth/login", async (req, res, next) => {
   try {
     const email = safeEmail(req.body?.email);
     const password = String(req.body?.password || "");
+
     if (!email || !password) {
       return res.status(400).json({
         error: "VALIDATION_ERROR",
         message: "Email and password required.",
       });
     }
+
     const user = await getUserByEmail(email);
-    if (!user) return res.status(401).json({ error: "INVALID_CREDENTIALS" });
+    if (!user) {
+      return res.status(401).json({ error: "INVALID_CREDENTIALS" });
+    }
 
     const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok) return res.status(401).json({ error: "INVALID_CREDENTIALS" });
+    if (!ok) {
+      return res.status(401).json({ error: "INVALID_CREDENTIALS" });
+    }
 
     const payload = { sub: user.id, email: user.email, role: user.role };
     const access_token = signAccess(payload);
     const refresh_token = signRefresh(payload);
     await setRefreshToken(user.id, refresh_token);
 
-    return res.json({
+    // ✅ LOGIN RESPONSE IMMEDIATELY
+    res.json({
       access_token,
       refresh_token,
       user: { id: user.id, email: user.email, role: user.role },
+      auto_sync: {
+        attempted: true,
+        mode: "background",
+      },
     });
+
+    // ✅ BACKGROUND AUTO SYNC
+    setTimeout(() => {
+      runLoginAutoSyncInBackground({ userId: user.id, role: user.role });
+    }, 0);
   } catch (e) {
     next(e);
   }
@@ -2232,7 +2955,6 @@ app.post("/api/meta/connect-pages", requireAuth, async (req, res, next) => {
           updated_at: new Date().toISOString(),
         });
 
-        // IMPORTANT: store page token under IG external_id as you already do
         if (pageToken) {
           tokenRows.push({
             workspace_id: workspaceId,
@@ -2275,82 +2997,282 @@ app.post("/api/meta/connect-pages", requireAuth, async (req, res, next) => {
   }
 });
 
-/* ============================================================
-   PUBLISHER HELPERS (META)
-============================================================ */
-async function publishFacebookPost({ pageId, pageToken, message, link }) {
-  const url = new URL(
-    `https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/feed`
-  );
+/* ---------------- TikTok OAuth Exchange ---------------- */
 
-  const body = new URLSearchParams();
-  body.set("access_token", pageToken);
-  if (message) body.set("message", message);
-  if (link) body.set("link", link);
+app.post("/api/tiktok/exchange", async (req, res) => {
+  try {
+    const { code, workspaceId } = req.body;
 
-  const r = await fetch(url.toString(), {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
+    if (!code || !workspaceId) {
+      return res.status(400).json({
+        error: "Missing code or workspaceId",
+      });
+    }
 
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) {
-    const e = new Error(j?.error?.message || "Facebook publish failed");
-    e.meta = j?.error || j;
-    throw e;
-  }
-  return j;
-}
-
-async function publishInstagramPost({ igUserId, token, caption, imageUrl }) {
-  if (!imageUrl)
-    throw new Error(
-      "Instagram publishing requires imageUrl (feed posts can't be text-only)."
+    const tokenRes = await fetch(
+      "https://open.tiktokapis.com/v2/oauth/token/",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          client_key: process.env.TIKTOK_CLIENT_KEY,
+          client_secret: process.env.TIKTOK_CLIENT_SECRET,
+          code,
+          grant_type: "authorization_code",
+          redirect_uri: process.env.TIKTOK_REDIRECT_URI,
+        }),
+      }
     );
 
-  const createUrl = new URL(
-    `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media`
-  );
-  createUrl.searchParams.set("access_token", token);
+    const tokenData = await tokenRes.json();
 
-  const r1 = await fetch(createUrl.toString(), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ image_url: imageUrl, caption: caption || "" }),
-  });
+    if (!tokenData.access_token) {
+      return res.status(400).json(tokenData);
+    }
 
-  const j1 = await r1.json().catch(() => ({}));
-  if (!r1.ok) {
-    const e = new Error(j1?.error?.message || "IG create media failed");
-    e.meta = j1?.error || j1;
-    throw e;
+    const userRes = await fetch(
+      "https://open.tiktokapis.com/v2/user/info/?fields=open_id,display_name,avatar_url",
+      {
+        headers: {
+          Authorization: `Bearer ${tokenData.access_token}`,
+        },
+      }
+    );
+
+    const userData = await userRes.json();
+
+    const user = userData.data.user;
+
+    await supabase.from("channels").insert({
+      workspace_id: workspaceId,
+      platform: "tiktok",
+      external_id: user.open_id,
+      display_name: user.display_name,
+      access_token: tokenData.access_token,
+      refresh_token: tokenData.refresh_token,
+      token_expires_at: new Date(
+        Date.now() + tokenData.expires_in * 1000
+      ).toISOString(),
+      status: "connected",
+    });
+
+    res.json({
+      success: true,
+      user,
+    });
+  } catch (err) {
+    console.error("TikTok exchange error:", err);
+    res.status(500).json({
+      error: "TikTok exchange failed",
+    });
   }
+});
 
-  const creationId = j1?.id;
-  if (!creationId) throw new Error("IG create media returned no id.");
 
-  const pubUrl = new URL(
-    `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media_publish`
-  );
-  pubUrl.searchParams.set("access_token", token);
+/* ============================================================
+   META ANALYTICS HELPERS + API
+============================================================ */
+app.get(
+  "/api/workspaces/:workspaceId/analytics/meta",
+  requireAuth,
+  requireWorkspaceAccess,
+  async (req, res, next) => {
+    try {
+      const { workspaceId } = req.params;
+      const days = Math.min(90, Math.max(1, Number(req.query.days || 30)));
+      const provider = providerMeta();
 
-  const r2 = await fetch(pubUrl.toString(), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ creation_id: creationId }),
-  });
+      const sinceMs = Date.now() - days * 86400000;
 
-  const j2 = await r2.json().catch(() => ({}));
-  if (!r2.ok) {
-    const e = new Error(j2?.error?.message || "IG publish failed");
-    e.meta = j2?.error || j2;
-    throw e;
+      const { data: channels, error } = await supabase
+        .from(T_CHANNELS)
+        .select("id,provider,platform,display_name,external_id,status,meta")
+        .eq("workspace_id", workspaceId)
+        .eq("provider", provider)
+        .eq("status", CHANNEL_STATUS_CONNECTED);
+
+      if (error) throw error;
+
+      const totals = {
+        facebook: {
+          impressions: 0,
+          reach: 0,
+          post_engagements: 0,
+          followers: 0,
+        },
+        instagram: {
+          impressions: 0,
+          reach: 0,
+          profile_views: 0,
+          followers: 0,
+        },
+      };
+
+      const chartMap = new Map(); // yyyy-mm-dd -> value
+      const top_posts = [];
+
+      // FACEBOOK
+      for (const ch of channels || []) {
+        if (ch.platform !== "facebook") continue;
+
+        const pageId = String(ch.external_id || "");
+        const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
+        if (!pageToken) continue;
+
+        const feed = await fetchFacebookFeedAnalytics({
+          pageId,
+          pageToken,
+          limit: 100,
+        });
+
+        for (const p of feed?.data || []) {
+          const createdMs = p?.created_time ? new Date(p.created_time).getTime() : 0;
+          if (!createdMs || createdMs < sinceMs) continue;
+
+          const likes = Number(p?.likes?.summary?.total_count || 0);
+          const comments = Number(p?.comments?.summary?.total_count || 0);
+          const shares = Number(p?.shares?.count || 0);
+          const engagement = likes + comments + shares;
+
+          totals.facebook.impressions += engagement;
+          totals.facebook.reach += engagement;
+          totals.facebook.post_engagements += engagement;
+
+          const dateKey = new Date(createdMs).toISOString().slice(0, 10);
+          chartMap.set(dateKey, Number(chartMap.get(dateKey) || 0) + engagement);
+
+          top_posts.push({
+            platform: "facebook",
+            id: p.id,
+            message: p.message || "",
+            created_time: p.created_time,
+            permalink: p.permalink_url || "",
+            likes,
+            comments,
+            shares,
+            engagement_score: engagement,
+          });
+        }
+      }
+
+      // INSTAGRAM
+      for (const ch of channels || []) {
+        if (ch.platform !== "instagram") continue;
+
+        const igUserId = String(ch?.meta?.ig_user_id || ch.external_id || "");
+        const pageIdFromMeta = String(ch?.meta?.page_id || "");
+
+        let token = await getTokenFromDB({
+          workspaceId,
+          externalId: igUserId,
+          token_type: "page",
+        });
+
+        if (!token && pageIdFromMeta) {
+          token = await getTokenFromDB({
+            workspaceId,
+            externalId: pageIdFromMeta,
+            token_type: "page",
+          });
+        }
+
+        if (!token) continue;
+
+        const media = await fetchInstagramMediaAnalytics({
+          igUserId,
+          token,
+          limit: 100,
+        });
+
+        for (const m of media?.data || []) {
+          const createdMs = m?.timestamp ? new Date(m.timestamp).getTime() : 0;
+          if (!createdMs || createdMs < sinceMs) continue;
+
+          const likes = Number(m?.like_count || 0);
+          const comments = Number(m?.comments_count || 0);
+          const engagement = likes + comments;
+
+          totals.instagram.impressions += engagement;
+          totals.instagram.reach += engagement;
+          totals.instagram.profile_views += engagement;
+
+          const dateKey = new Date(createdMs).toISOString().slice(0, 10);
+          chartMap.set(dateKey, Number(chartMap.get(dateKey) || 0) + engagement);
+
+          top_posts.push({
+            platform: "instagram",
+            id: m.id,
+            message: m.caption || "",
+            created_time: m.timestamp,
+            permalink: m.permalink || "",
+            likes,
+            comments,
+            shares: 0,
+            engagement_score: engagement,
+          });
+        }
+      }
+
+      const chartSeries = Array.from(chartMap.entries())
+        .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+        .map(([date, value]) => ({ date, value }));
+
+      top_posts.sort((a, b) => b.engagement_score - a.engagement_score);
+
+      return res.json({
+        ok: true,
+        days,
+        totals,
+        chart: {
+          series: chartSeries,
+        },
+        top_posts: top_posts.slice(0, 10),
+      });
+    } catch (e) {
+      next(e);
+    }
   }
+);
+app.post("/api/uploads", requireAuth, upload.single("file"), async (req, res, next) => {
+  try {
+    const workspaceId = String(req.body?.workspaceId || "").trim();
+    if (!workspaceId) {
+      return res.status(400).json({
+        error: "VALIDATION_ERROR",
+        message: "workspaceId is required",
+      });
+    }
 
-  return { creation_id: creationId, ...j2 };
-}
+    if (!req.file) {
+      return res.status(400).json({
+        error: "VALIDATION_ERROR",
+        message: "file is required",
+      });
+    }
 
+    if (!isGlobalAdmin(req.auth.role)) {
+      const role = await getWorkspaceMemberRole(req.auth.userId, workspaceId);
+      if (!role) {
+        return res.status(403).json({ error: "WORKSPACE_FORBIDDEN" });
+      }
+    }
+
+    const uploaded = await uploadPublisherFileToStorage({
+      workspaceId,
+      userId: req.auth.userId,
+      file: req.file,
+    });
+
+    return res.json({
+      ok: true,
+      ...uploaded,
+    });
+  } catch (e) {
+    next(e);
+  }
+});
 /* ============================================================
    PUBLISHER APIs
 ============================================================ */
@@ -2377,10 +3299,10 @@ app.get(
         ...c,
         capabilities:
           c.platform === "facebook"
-            ? { text: true, link: true, image: true }
+            ? { text: true, link: true, image: true, video: true }
             : c.platform === "instagram"
-            ? { text: false, link: false, image: true }
-            : { text: false, link: false, image: false },
+            ? { text: false, link: false, image: true, video: true, reel: true }
+            : { text: false, link: false, image: false, video: false },
       }));
 
       res.json({ channels });
@@ -2594,11 +3516,15 @@ async function publishPostNow({ workspaceId, postId }) {
       if (t.provider === "meta" && t.platform === "facebook") {
         const message = String(post.text || "");
         const link = post.link_url ? String(post.link_url) : "";
+        const mediaUrls = Array.isArray(post.media_urls) ? post.media_urls : [];
+        const mediaUrl = mediaUrls[0] ? String(mediaUrls[0]) : "";
+
         const r = await publishFacebookPost({
           pageId: String(t.external_id),
           pageToken: token,
           message,
           link,
+          mediaUrl,
         });
 
         updates.push(
@@ -2606,7 +3532,7 @@ async function publishPostNow({ workspaceId, postId }) {
             .from(T_SOCIAL_POST_TARGETS)
             .update({
               status: "published",
-              published_id: String(r?.id || ""),
+              published_id: String(r?.id || r?.post_id || r?.video_id || ""),
               meta: { ...(t.meta || {}), result: r },
             })
             .eq("id", t.id)
@@ -2614,13 +3540,41 @@ async function publishPostNow({ workspaceId, postId }) {
       } else if (t.provider === "meta" && t.platform === "instagram") {
         const caption = String(post.text || "");
         const mediaUrls = Array.isArray(post.media_urls) ? post.media_urls : [];
-        const imageUrl = mediaUrls[0] ? String(mediaUrls[0]) : "";
+        const mediaUrl = mediaUrls[0] ? String(mediaUrls[0]) : "";
+
+        const ch = await getChannelById({
+          workspaceId,
+          channelId: t.channel_id,
+        });
+
+        if (!ch) throw new Error("Instagram channel not found");
+
+        const igUserId = String(ch?.meta?.ig_user_id || ch.external_id || "");
+        const pageIdFromMeta = String(ch?.meta?.page_id || "");
+
+        let igToken = await getTokenFromDB({
+          workspaceId,
+          externalId: igUserId,
+          token_type: "page",
+        });
+
+        if (!igToken && pageIdFromMeta) {
+          igToken = await getTokenFromDB({
+            workspaceId,
+            externalId: pageIdFromMeta,
+            token_type: "page",
+          });
+        }
+
+        if (!igToken) {
+          throw new Error("Missing Instagram publish token");
+        }
 
         const r = await publishInstagramPost({
-          igUserId: String(t.external_id),
-          token,
+          igUserId,
+          token: igToken,
           caption,
-          imageUrl,
+          mediaUrl,
         });
 
         updates.push(
@@ -2628,7 +3582,7 @@ async function publishPostNow({ workspaceId, postId }) {
             .from(T_SOCIAL_POST_TARGETS)
             .update({
               status: "published",
-              published_id: String(r?.id || r?.media_id || ""),
+              published_id: String(r?.id || r?.media_id || r?.creation_id || ""),
               meta: { ...(t.meta || {}), result: r },
             })
             .eq("id", t.id)
@@ -2799,7 +3753,7 @@ app.get(
   }
 );
 
-// ✅ Workspace-friendly alias (helps if you switch frontend later)
+// ✅ Workspace-friendly alias
 app.get(
   "/api/workspaces/:workspaceId/inbox/threads/:threadId/messages",
   requireAuth,
@@ -2821,7 +3775,7 @@ app.get(
   }
 );
 
-// Read messages from memory (legacy route your frontend uses)
+// Legacy route
 app.get("/api/inbox/threads/:threadId/messages", requireAuth, async (req, res, next) => {
   try {
     const { threadId } = req.params;
@@ -2852,7 +3806,7 @@ app.get("/api/inbox/threads/:threadId/messages", requireAuth, async (req, res, n
   }
 });
 
-// Send outbound message (NO DB). Send to Meta then store in memory + emit.
+// Send outbound message
 app.post("/api/inbox/threads/:threadId/messages", requireAuth, async (req, res, next) => {
   try {
     const { threadId } = req.params;
@@ -2966,336 +3920,8 @@ app.post(
   async (req, res) => {
     try {
       const { workspaceId } = req.params;
-      const provider = providerMeta();
-
-      const igErrors = [];
-
-      // ---------- FB Pages ----------
-      const { data: fbPages, error: fbErr } = await supabase
-        .from(T_CHANNELS)
-        .select("id,external_id,display_name,platform,provider,status,meta")
-        .eq("workspace_id", workspaceId)
-        .eq("provider", provider)
-        .eq("platform", "facebook")
-        .eq("status", CHANNEL_STATUS_CONNECTED);
-
-      if (fbErr) throw fbErr;
-
-      let threadsUpserted = 0;
-      let messagesUpserted = 0;
-
-      for (const ch of fbPages || []) {
-        const pageId = String(ch.external_id);
-        const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
-        if (!pageToken) continue;
-
-        const convos = await fetchAllPageConversations({
-          pageId,
-          pageToken,
-          maxConvos: 500,
-        });
-
-        for (const c of convos) {
-          const externalThreadId = String(c.id);
-          const updated = c.updated_time
-            ? new Date(c.updated_time).toISOString()
-            : new Date().toISOString();
-          const snippet = String(c.snippet || "").slice(0, 200);
-
-          const participants = c?.participants?.data || [];
-          const other =
-            participants.find((p) => String(p?.id || "") !== String(pageId)) ||
-            participants[0] ||
-            null;
-
-          const participantExternalId = other?.id ? String(other.id) : null;
-          const participantName = other?.name ? String(other.name) : "Messenger User";
-
-          const threadId = buildThreadId({
-            provider,
-            platform: "facebook",
-            channelExternalId: pageId,
-            externalThreadId,
-          });
-
-          const thread = upsertThreadInMemory(workspaceId, {
-            id: threadId,
-            workspace_id: workspaceId,
-            provider,
-            platform: "facebook",
-            channel_id: ch.id,
-            channel: {
-              id: ch.id,
-              display_name: ch.display_name,
-              external_id: pageId,
-              platform: "facebook",
-              provider,
-            },
-            external_thread_id: externalThreadId,
-            participant_external_id: participantExternalId,
-            participant_name: participantName,
-            participant_username: null,
-            last_message_at: updated,
-            last_message_snippet: snippet,
-            status: "open",
-            unread_count: 0,
-            updated_at: new Date().toISOString(),
-          });
-
-          threadsUpserted += 1;
-          emitToWorkspace(workspaceId, "thread_upsert", thread);
-
-          const msgs = await fetchAllConversationMessages({
-            conversationId: externalThreadId,
-            pageToken,
-            maxMsgs: 500,
-          });
-
-          let latestText = "";
-
-          for (const m of msgs || []) {
-            const mid = String(m.id);
-            const created = m.created_time
-              ? new Date(m.created_time).toISOString()
-              : new Date().toISOString();
-
-            const fromId = m?.from?.id ? String(m.from.id) : null;
-            const fromName = m?.from?.name ? String(m.from.name) : null;
-            const text = normalizeText(m.message);
-
-            const direction = fromId && String(fromId) === String(pageId) ? "outbound" : "inbound";
-            if (text) latestText = text;
-
-            const msg = upsertMessageInMemory(workspaceId, threadId, {
-              id: `mem_${Date.now()}_${Math.random().toString(16).slice(2)}`,
-              workspace_id: workspaceId,
-              thread_id: threadId,
-              channel_id: ch.id,
-              provider,
-              platform: "facebook",
-              external_message_id: mid,
-              direction,
-              sender_external_id: fromId,
-              sender_name: fromName,
-              message_type: "text",
-              text,
-              sent_at: created,
-              meta: {},
-            });
-
-            messagesUpserted += 1;
-            emitToWorkspace(workspaceId, "message_upsert", msg);
-          }
-
-          if (latestText) {
-            const t2 = upsertThreadInMemory(workspaceId, {
-              ...thread,
-              last_message_snippet: latestText.slice(0, 200),
-              updated_at: new Date().toISOString(),
-            });
-            emitToWorkspace(workspaceId, "thread_upsert", t2);
-          }
-        }
-      }
-
-      // ---------- Instagram ----------
-      const { data: igAccounts, error: igErr } = await supabase
-        .from(T_CHANNELS)
-        .select("id,external_id,display_name,platform,provider,status,meta")
-        .eq("workspace_id", workspaceId)
-        .eq("provider", provider)
-        .eq("platform", "instagram")
-        .eq("status", CHANNEL_STATUS_CONNECTED);
-
-      if (igErr) throw igErr;
-
-      let igThreadsUpserted = 0;
-      let igMessagesUpserted = 0;
-
-      for (const igCh of igAccounts || []) {
-        const igUserId = String(igCh.external_id);
-        const pageIdForIg = String(igCh?.meta?.page_id || "");
-
-        const igToken = await getTokenFromDB({
-          workspaceId,
-          externalId: igUserId,
-          token_type: "page",
-        });
-
-        if (!igToken) continue;
-
-        let convos = [];
-        let usedFallback = false;
-
-        // 1) try IG endpoint
-        try {
-          convos = await fetchAllIgConversations({
-            igUserId,
-            token: igToken,
-            maxConvos: 200,
-          });
-        } catch (e1) {
-          // 2) fallback to PAGE conversations with platform=instagram (requires page_id in meta)
-          try {
-            if (!pageIdForIg)
-              throw new Error("IG channel meta.page_id missing (needed for fallback)");
-
-            convos = await fetchAllPageConversations({
-              pageId: pageIdForIg,
-              pageToken: igToken,
-              maxConvos: 200,
-              platform: "instagram",
-            });
-            usedFallback = true;
-          } catch (e2) {
-            const code = e1?.meta?.code || e1?.meta?.error?.code || null;
-            igErrors.push({
-              igUserId,
-              message: e1?.message || "IG conversations fetch failed",
-              meta: e1?.meta || null,
-              hint:
-                Number(code) === 10 || Number(code) === 200
-                  ? "Missing permissions/scopes for Instagram Messaging."
-                  : Number(code) === 3
-                  ? "Endpoint unsupported: Instagram Messaging product not enabled or app review missing."
-                  : "Check IG professional account + connected page + app mode + permissions.",
-              fallback_error: { message: e2?.message || "Fallback failed" },
-            });
-            continue;
-          }
-        }
-
-        for (const c of convos || []) {
-          const externalThreadId = String(c.id);
-          const updated = c.updated_time
-            ? new Date(c.updated_time).toISOString()
-            : new Date().toISOString();
-
-          const participants = c?.participants?.data || [];
-          const other = participants?.[0] || null;
-
-          const participantExternalId = other?.id ? String(other.id) : null;
-          const participantName =
-            other?.username || other?.name
-              ? String(other.username || other.name)
-              : "IG User";
-
-          const threadId = buildThreadId({
-            provider,
-            platform: "instagram",
-            channelExternalId: igUserId,
-            externalThreadId,
-          });
-
-          const thread = upsertThreadInMemory(workspaceId, {
-            id: threadId,
-            workspace_id: workspaceId,
-            provider,
-            platform: "instagram",
-            channel_id: igCh.id,
-            channel: {
-              id: igCh.id,
-              display_name: igCh.display_name,
-              external_id: igUserId,
-              platform: "instagram",
-              provider,
-            },
-            external_thread_id: externalThreadId,
-            participant_external_id: participantExternalId,
-            participant_name: participantName,
-            participant_username: other?.username ? String(other.username) : null,
-            last_message_at: updated,
-            last_message_snippet: "",
-            status: "open",
-            unread_count: 0,
-            updated_at: new Date().toISOString(),
-          });
-
-          igThreadsUpserted += 1;
-          emitToWorkspace(workspaceId, "thread_upsert", thread);
-
-          let msgs = [];
-          try {
-            msgs = await fetchAllIgMessages({
-              conversationId: externalThreadId,
-              token: igToken,
-              maxMsgs: 200,
-            });
-          } catch (e) {
-            igErrors.push({
-              igUserId,
-              conversationId: externalThreadId,
-              message: e?.message || "IG messages fetch failed",
-              meta: e?.meta || null,
-            });
-            continue;
-          }
-
-          let latestText = "";
-
-          for (const m of msgs || []) {
-            const mid = String(m.id);
-            const created = m.created_time
-              ? new Date(m.created_time).toISOString()
-              : new Date().toISOString();
-
-            const fromId = m?.from?.id ? String(m.from.id) : null;
-            const fromName =
-              m?.from?.username || m?.from?.name
-                ? String(m.from.username || m.from.name)
-                : null;
-            const text = normalizeText(m.message);
-
-            const direction =
-              fromId &&
-              (String(fromId) === String(igUserId) ||
-                (pageIdForIg && String(fromId) === String(pageIdForIg)))
-                ? "outbound"
-                : "inbound";
-
-            if (text) latestText = text;
-
-            const msg = upsertMessageInMemory(workspaceId, threadId, {
-              id: `mem_${Date.now()}_${Math.random().toString(16).slice(2)}`,
-              workspace_id: workspaceId,
-              thread_id: threadId,
-              channel_id: igCh.id,
-              provider,
-              platform: "instagram",
-              external_message_id: mid,
-              direction,
-              sender_external_id: fromId,
-              sender_name: fromName,
-              message_type: "text",
-              text,
-              sent_at: created,
-              meta: { usedFallback },
-            });
-
-            igMessagesUpserted += 1;
-            emitToWorkspace(workspaceId, "message_upsert", msg);
-          }
-
-          if (latestText) {
-            const t2 = upsertThreadInMemory(workspaceId, {
-              ...thread,
-              last_message_snippet: latestText.slice(0, 200),
-              updated_at: new Date().toISOString(),
-            });
-            emitToWorkspace(workspaceId, "thread_upsert", t2);
-          }
-        }
-      }
-
-      return res.json({
-        ok: true,
-        threads_upserted: threadsUpserted,
-        messages_upserted: messagesUpserted,
-        ig_threads_upserted: igThreadsUpserted,
-        ig_messages_upserted: igMessagesUpserted,
-        ig_errors: igErrors,
-        storage: "memory",
-      });
+      const result = await syncMetaInboxToMemory({ workspaceId });
+      return res.json(result);
     } catch (e) {
       console.error("SYNC ERROR:", e?.message, e?.meta || "");
       const msg = e?.message || "Sync failed";

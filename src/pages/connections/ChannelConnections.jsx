@@ -1,52 +1,21 @@
-// src/pages/connections/ChannelConnections.jsx
 import React, { useEffect, useMemo, useState } from "react";
 import AppShell from "../../components/AppShell.jsx";
 import { buildMetaAuthUrl } from "../../lib/metaConnect";
-
-const DUMMY_LOGS = [
-  {
-    id: "l1",
-    channel: "Facebook",
-    icon: { glyph: "social_leaderboard", cls: "text-blue-400" },
-    event: "Auth Token Refresh",
-    time: "Oct 24, 2023 - 14:20:12",
-    status: "Success",
-  },
-  {
-    id: "l2",
-    channel: "Instagram",
-    icon: { glyph: "camera", cls: "text-pink-400" },
-    event: "API Handshake",
-    time: "Oct 24, 2023 - 13:45:01",
-    status: "Warning",
-  },
-];
+import { buildTikTokAuthUrl } from "../../lib/tiktokConnect";
 
 function StatusBadge({ tone, label }) {
   const dotCls = tone === "warn" ? "bg-amber-500 animate-pulse" : "bg-primary";
   const textCls = tone === "warn" ? "text-amber-500" : "text-primary";
+
   return (
     <div className="mt-1 flex items-center gap-2">
       <span className={["flex h-2 w-2 rounded-full", dotCls].join(" ")} />
-      <span className={[textCls, "text-sm font-semibold uppercase tracking-wide"].join(" ")}>
+      <span
+        className={[textCls, "text-sm font-semibold uppercase tracking-wide"].join(" ")}
+      >
         {label}
       </span>
     </div>
-  );
-}
-
-function LogStatusPill({ status }) {
-  if (status === "Warning") {
-    return (
-      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-amber-500/10 text-amber-500">
-        Warning
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-bold bg-primary/10 text-primary">
-      Success
-    </span>
   );
 }
 
@@ -59,6 +28,7 @@ function channelIcon(platform) {
       glyph: "social_leaderboard",
     };
   }
+
   if (platform === "instagram") {
     return {
       bg: "bg-gradient-to-tr from-pink-500/20 to-orange-500/20",
@@ -67,6 +37,16 @@ function channelIcon(platform) {
       glyph: "camera",
     };
   }
+
+  if (platform === "tiktok") {
+    return {
+      bg: "bg-black/30",
+      border: "border-white/20",
+      text: "text-white",
+      glyph: "music_note",
+    };
+  }
+
   return {
     bg: "bg-orange-600/20",
     border: "border-orange-500/30",
@@ -81,6 +61,7 @@ function toneFromStatus(status) {
   if (s.includes("disconnected")) return "warn";
   return "ok";
 }
+
 function labelFromStatus(status) {
   const s = String(status || "").toLowerCase();
   if (s.includes("disconnected")) return "Disconnected";
@@ -88,8 +69,16 @@ function labelFromStatus(status) {
   return "Connected";
 }
 
+function platformLabel(platform) {
+  const p = String(platform || "").toLowerCase();
+  if (p === "facebook") return "Facebook";
+  if (p === "instagram") return "Instagram";
+  if (p === "tiktok") return "TikTok";
+  return "Channel";
+}
+
 export default function ChannelConnections({ theme, setTheme }) {
-  const API_BASE = import.meta.env.VITE_API_BASE;
+  const API_BASE = import.meta.env.VITE_API_BASE?.trim();
 
   const [q, setQ] = useState("");
 
@@ -117,45 +106,73 @@ export default function ChannelConnections({ theme, setTheme }) {
   }
 
   async function apiFetch(path, opts = {}) {
-    const res = await fetch(`${API_BASE}${path}`, {
+    if (!API_BASE) throw new Error("Missing VITE_API_BASE");
+
+    const fetchOptions = {
       ...opts,
       headers: {
         ...(opts.headers || {}),
         Authorization: `Bearer ${getAccessToken()}`,
-        ...(opts.body ? { "Content-Type": "application/json" } : {}),
       },
-    });
+    };
+
+    if (opts.body) {
+      fetchOptions.headers["Content-Type"] = "application/json";
+      fetchOptions.body =
+        typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body);
+    }
+
+    const res = await fetch(`${API_BASE}${path}`, fetchOptions);
 
     const isJson = (res.headers.get("content-type") || "").includes("application/json");
     const payload = isJson ? await res.json() : await res.text();
 
     if (!res.ok) {
       const msg =
-        (payload && typeof payload === "object" && (payload.message || payload.error)) ||
+        (payload &&
+          typeof payload === "object" &&
+          (payload.message || payload.error || payload.details)) ||
         (typeof payload === "string" ? payload : "") ||
         `Request failed: ${res.status}`;
+
       const e = new Error(msg);
       e.payload = payload;
       throw e;
     }
+
     return payload;
+  }
+
+  async function loadWorkspaces() {
+    try {
+      setWsLoading(true);
+      setErr("");
+
+      const j = await apiFetch("/api/workspaces", { method: "GET" });
+      const ws = j?.workspaces || [];
+      setWorkspaces(ws);
+
+      if (!workspaceId && ws.length) {
+        const saved = localStorage.getItem("active_workspace_id") || "";
+        const foundSaved = ws.find((w) => String(w.id) === String(saved));
+
+        if (foundSaved) {
+          setWorkspaceId(foundSaved.id);
+        } else {
+          setWorkspaceId(ws[0].id);
+        }
+      }
+    } catch (e) {
+      setErr(String(e?.message || e));
+      setWorkspaces([]);
+    } finally {
+      setWsLoading(false);
+    }
   }
 
   // Load workspaces
   useEffect(() => {
-    (async () => {
-      try {
-        setWsLoading(true);
-        setErr("");
-        const j = await apiFetch("/api/workspaces", { method: "GET" });
-        setWorkspaces(j?.workspaces || []);
-      } catch (e) {
-        setErr(String(e?.message || e));
-        setWorkspaces([]);
-      } finally {
-        setWsLoading(false);
-      }
-    })();
+    loadWorkspaces();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -166,13 +183,20 @@ export default function ChannelConnections({ theme, setTheme }) {
   }, [workspaceId]);
 
   async function loadChannels(wsId) {
+    if (!wsId) {
+      setChannels([]);
+      return;
+    }
+
     setLoading(true);
     setErr("");
+
     try {
       const j = await apiFetch(
-        `/api/workspaces/${encodeURIComponent(wsId)}/channels?provider=meta`,
+        `/api/workspaces/${encodeURIComponent(wsId)}/channels`,
         { method: "GET" }
       );
+
       setChannels(j?.channels || []);
     } catch (e) {
       setErr(String(e?.message || e));
@@ -200,15 +224,29 @@ export default function ChannelConnections({ theme, setTheme }) {
     window.location.assign(buildMetaAuthUrl({ workspaceId }));
   }
 
-  // ✅ OPTION A: Open picker from MetaCallback result stored in localStorage
-  // IMPORTANT: MetaCallback MUST store:
-  // localStorage.setItem("meta_exchange_result", JSON.stringify({ ...exchangeResponse, workspaceId }))
+  function connectTikTok() {
+    if (!workspaceId) {
+      alert("Select a workspace first.");
+      return;
+    }
+    window.location.assign(buildTikTokAuthUrl({ workspaceId }));
+  }
+
+  function reconnectChannel(channel) {
+    const platform = String(channel?.platform || "").toLowerCase();
+    if (platform === "tiktok") {
+      connectTikTok();
+      return;
+    }
+    connectMeta();
+  }
+
+  // MetaCallback result
   useEffect(() => {
     try {
       const raw = localStorage.getItem("meta_exchange_result");
       if (!raw) return;
 
-      // remove FIRST to avoid re-open loops on errors/refresh
       localStorage.removeItem("meta_exchange_result");
 
       const j = JSON.parse(raw || "{}");
@@ -219,7 +257,6 @@ export default function ChannelConnections({ theme, setTheme }) {
         return;
       }
 
-      // force workspace to callback workspace
       if (stWsId !== workspaceId) {
         setWorkspaceId(stWsId);
         localStorage.setItem("active_workspace_id", stWsId);
@@ -230,7 +267,6 @@ export default function ChannelConnections({ theme, setTheme }) {
       setUserToken(j?.user_access_token || "");
       setExpiresIn(j?.expires_in ?? null);
 
-      // default selections
       const next = {};
       for (const p of returnedPages) {
         next[p.pageId] = {
@@ -240,7 +276,6 @@ export default function ChannelConnections({ theme, setTheme }) {
       }
       setSelections(next);
 
-      // open modal after state updates flush
       setTimeout(() => setPickerOpen(true), 0);
     } catch (e) {
       console.error("Failed to read meta_exchange_result:", e);
@@ -249,10 +284,44 @@ export default function ChannelConnections({ theme, setTheme }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // TikTokCallback result
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("tiktok_exchange_result");
+      if (!raw) return;
+
+      localStorage.removeItem("tiktok_exchange_result");
+
+      const j = JSON.parse(raw || "{}");
+      const stWsId = String(j?.workspaceId || "");
+
+      if (!stWsId) {
+        setErr("TikTok connect failed: missing workspaceId in exchange result.");
+        return;
+      }
+
+      if (stWsId !== workspaceId) {
+        setWorkspaceId(stWsId);
+        localStorage.setItem("active_workspace_id", stWsId);
+      }
+
+      setTimeout(() => {
+        loadChannels(stWsId);
+      }, 0);
+    } catch (e) {
+      console.error("Failed to read tiktok_exchange_result:", e);
+      setErr("TikTok connect failed: could not parse exchange result.");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   function toggle(pageId, key) {
     setSelections((prev) => ({
       ...prev,
-      [pageId]: { ...prev[pageId], [key]: !prev[pageId]?.[key] },
+      [pageId]: {
+        ...prev[pageId],
+        [key]: !prev[pageId]?.[key],
+      },
     }));
   }
 
@@ -286,15 +355,20 @@ export default function ChannelConnections({ theme, setTheme }) {
 
       await apiFetch("/api/meta/connect-pages", {
         method: "POST",
-        body: JSON.stringify({
+        body: {
           workspaceId,
           user_access_token: userToken,
           expires_in: expiresIn,
           selections: selectedRows,
-        }),
+        },
       });
 
       setPickerOpen(false);
+      setPages([]);
+      setSelections({});
+      setUserToken("");
+      setExpiresIn(null);
+
       await loadChannels(workspaceId);
     } catch (e) {
       alert(String(e?.message || e));
@@ -323,29 +397,16 @@ export default function ChannelConnections({ theme, setTheme }) {
   const filteredChannels = useMemo(() => {
     const s = q.trim().toLowerCase();
     if (!s) return channels;
+
     return (channels || []).filter((c) => {
       return (
-        String(c.platform).toLowerCase().includes(s) ||
-        String(c.display_name).toLowerCase().includes(s) ||
-        String(c.status).toLowerCase().includes(s) ||
-        String(c.external_id).toLowerCase().includes(s)
+        String(c.platform || "").toLowerCase().includes(s) ||
+        String(c.display_name || "").toLowerCase().includes(s) ||
+        String(c.status || "").toLowerCase().includes(s) ||
+        String(c.external_id || "").toLowerCase().includes(s)
       );
     });
   }, [q, channels]);
-
-  const showLogs = (channels || []).length > 0;
-  const filteredLogs = useMemo(() => {
-    if (!showLogs) return [];
-    const s = q.trim().toLowerCase();
-    if (!s) return DUMMY_LOGS;
-    return DUMMY_LOGS.filter((l) => {
-      return (
-        l.channel.toLowerCase().includes(s) ||
-        l.event.toLowerCase().includes(s) ||
-        l.status.toLowerCase().includes(s)
-      );
-    });
-  }, [q, showLogs]);
 
   return (
     <AppShell
@@ -359,9 +420,11 @@ export default function ChannelConnections({ theme, setTheme }) {
       <div className="p-8 max-w-6xl mx-auto w-full space-y-8">
         <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4">
           <div>
-            <h2 className="text-4xl font-extrabold text-white tracking-tight">Connections</h2>
+            <h2 className="text-4xl font-extrabold text-white tracking-tight">
+              Connections
+            </h2>
             <p className="text-slate-400 mt-2 text-lg">
-              Workspace selected then press connect Meta, then select pages to connect.
+              Select workspace, connect Meta, then choose Facebook Pages and linked Instagram accounts.
             </p>
           </div>
 
@@ -376,7 +439,9 @@ export default function ChannelConnections({ theme, setTheme }) {
                 onChange={(e) => setWorkspaceId(e.target.value)}
                 className="w-full rounded-xl bg-white/5 border border-white/10 px-3 py-3 text-sm text-white outline-none focus:border-primary/40"
               >
-                <option value="">{wsLoading ? "Loading workspaces..." : "Select workspace..."}</option>
+                <option value="">
+                  {wsLoading ? "Loading workspaces..." : "Select workspace..."}
+                </option>
                 {(workspaces || []).map((w) => (
                   <option key={w.id} value={w.id}>
                     {w.name}
@@ -393,7 +458,18 @@ export default function ChannelConnections({ theme, setTheme }) {
               title={!workspaceId ? "Select a workspace first" : "Connect Meta"}
             >
               <span className="material-symbols-outlined">add_link</span>
-              Connect Meta (FB/IG)
+              Connect Meta
+            </button>
+
+            <button
+              className="bg-white text-black px-6 py-3 rounded-xl font-bold flex items-center gap-2 hover:opacity-90 transition-all disabled:opacity-60"
+              type="button"
+              onClick={connectTikTok}
+              disabled={!workspaceId}
+              title={!workspaceId ? "Select a workspace first" : "Connect TikTok"}
+            >
+              <span className="material-symbols-outlined">music_note</span>
+              Connect TikTok
             </button>
           </div>
         </div>
@@ -407,7 +483,9 @@ export default function ChannelConnections({ theme, setTheme }) {
         {err ? (
           <div className="glass-panel border border-red-500/20 bg-red-500/5 rounded-2xl p-6">
             <p className="text-red-200 font-bold">Failed</p>
-            <pre className="text-red-200/70 text-sm mt-2 whitespace-pre-wrap">{err}</pre>
+            <pre className="text-red-200/70 text-sm mt-2 whitespace-pre-wrap">
+              {err}
+            </pre>
           </div>
         ) : null}
 
@@ -418,14 +496,19 @@ export default function ChannelConnections({ theme, setTheme }) {
             </div>
           ) : !workspaceId ? (
             <div className="glass-panel border border-white/10 rounded-2xl p-8 text-center">
-              <p className="text-white font-bold">Select a workspace to view/manage connections</p>
-              <p className="text-white/50 text-sm mt-2">Meta connections are saved under a workspace.</p>
+              <p className="text-white font-bold">
+                Select a workspace to view/manage connections
+              </p>
+              <p className="text-white/50 text-sm mt-2">
+                Connected channels are saved under a workspace.
+              </p>
             </div>
           ) : filteredChannels.length === 0 ? (
             <div className="glass-panel border border-white/10 rounded-2xl p-8 text-center">
               <p className="text-white font-bold">No channels connected yet</p>
               <p className="text-white/50 text-sm mt-2">
-                Click <span className="text-primary font-semibold">Connect Meta</span> to link Pages and IG accounts.
+                Click <span className="text-primary font-semibold">Connect Meta</span> or{" "}
+                <span className="text-white font-semibold">Connect TikTok</span> to link accounts.
               </p>
             </div>
           ) : (
@@ -434,14 +517,17 @@ export default function ChannelConnections({ theme, setTheme }) {
               const icon = channelIcon(c.platform);
 
               const metaGrid = [
-                { label: "Platform", value: c.platform },
+                { label: "Platform", value: platformLabel(c.platform) },
                 { label: "External ID", value: c.external_id },
                 {
                   label: "Status",
                   value: labelFromStatus(c.status),
                   accent: tone === "warn" ? "warn" : "primary",
                 },
-                { label: "Updated", value: new Date(c.updated_at).toLocaleString() },
+                {
+                  label: "Updated",
+                  value: c.updated_at ? new Date(c.updated_at).toLocaleString() : "—",
+                },
               ];
 
               return (
@@ -461,7 +547,12 @@ export default function ChannelConnections({ theme, setTheme }) {
                       icon.border,
                     ].join(" ")}
                   >
-                    <span className={["material-symbols-outlined text-3xl leading-none", icon.text].join(" ")}>
+                    <span
+                      className={[
+                        "material-symbols-outlined text-3xl leading-none",
+                        icon.text,
+                      ].join(" ")}
+                    >
                       {icon.glyph}
                     </span>
                   </div>
@@ -469,14 +560,14 @@ export default function ChannelConnections({ theme, setTheme }) {
                   <div className="flex-1 grid grid-cols-1 lg:grid-cols-4 gap-6">
                     <div className="lg:col-span-1">
                       <h3 className="text-xl font-bold text-white">
-                        {c.platform === "facebook" ? "Facebook" : c.platform === "instagram" ? "Instagram" : "Channel"}
+                        {platformLabel(c.platform)}
                       </h3>
                       <StatusBadge tone={tone} label={labelFromStatus(c.status)} />
                     </div>
 
                     <div className="lg:col-span-2 space-y-2">
                       <p className="text-slate-300 font-medium">
-                        Account: <span className="text-white">{c.display_name}</span>
+                        Account: <span className="text-white">{c.display_name || "—"}</span>
                       </p>
 
                       <div className="grid grid-cols-2 gap-4 text-xs text-slate-500 uppercase font-bold tracking-widest mt-2">
@@ -494,7 +585,7 @@ export default function ChannelConnections({ theme, setTheme }) {
                                 "normal-case tracking-normal font-semibold mt-1",
                               ].join(" ")}
                             >
-                              {m.value}
+                              {m.value || "—"}
                             </span>
                           </div>
                         ))}
@@ -510,7 +601,7 @@ export default function ChannelConnections({ theme, setTheme }) {
                             : "bg-primary/10 border border-primary/20 text-primary hover:bg-primary hover:text-background-dark",
                         ].join(" ")}
                         type="button"
-                        onClick={connectMeta}
+                        onClick={() => reconnectChannel(c)}
                       >
                         Reconnect
                       </button>
@@ -530,68 +621,18 @@ export default function ChannelConnections({ theme, setTheme }) {
           )}
         </section>
 
-        {showLogs ? (
-          <section className="space-y-6 pt-6">
-            <div className="flex items-center justify-between">
-              <h3 className="text-2xl font-bold text-white">Connection Logs</h3>
-            </div>
-
-            <div className="glass-panel rounded-2xl overflow-hidden border border-primary/10">
-              <table className="w-full text-left border-collapse">
-                <thead>
-                  <tr className="bg-primary/5 border-b border-primary/10">
-                    <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-slate-500">Channel</th>
-                    <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-slate-500">Event</th>
-                    <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-slate-500">Timestamp</th>
-                    <th className="px-6 py-4 text-xs font-bold uppercase tracking-widest text-slate-500 text-right">Status</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-primary/5">
-                  {filteredLogs.map((l) => (
-                    <tr key={l.id} className="hover:bg-white/5 transition-colors">
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-3">
-                          <span className={["material-symbols-outlined text-lg", l.icon.cls].join(" ")}>
-                            {l.icon.glyph}
-                          </span>
-                          <span className="text-sm font-medium text-slate-200">{l.channel}</span>
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className="text-sm text-slate-400">{l.event}</span>
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className="text-sm text-slate-500">{l.time}</span>
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <LogStatusPill status={l.status} />
-                      </td>
-                    </tr>
-                  ))}
-                  {filteredLogs.length === 0 ? (
-                    <tr>
-                      <td className="px-6 py-8 text-center text-slate-500 text-sm" colSpan={4}>
-                        No logs matched your search.
-                      </td>
-                    </tr>
-                  ) : null}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        ) : null}
-
         {/* Page Picker Modal */}
         {pickerOpen ? (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black p-4">
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
             <div className="glass-panel border border-white/10 rounded-2xl w-full max-w-2xl p-6">
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <h3 className="text-xl font-black text-white">Select Pages to Connect</h3>
                   <p className="text-white/50 text-sm mt-1">
-                    Choose which Facebook Pages and Instagram accounts to connect.
+                    Choose which Facebook Pages and linked Instagram accounts to connect.
                   </p>
                 </div>
+
                 <button
                   className="text-white/60 hover:text-white"
                   onClick={() => setPickerOpen(false)}
@@ -605,17 +646,25 @@ export default function ChannelConnections({ theme, setTheme }) {
               <div className="mt-5 space-y-3 max-h-[55vh] overflow-y-auto custom-scrollbar pr-1">
                 {(pages || []).map((p) => {
                   const sel = selections[p.pageId] || {};
+
                   return (
-                    <div key={p.pageId} className="border border-white/10 rounded-xl p-4 bg-white/5">
+                    <div
+                      key={p.pageId}
+                      className="border border-white/10 rounded-xl p-4 bg-white/5"
+                    >
                       <div className="flex items-center justify-between gap-3">
                         <div className="min-w-0">
                           <div className="text-white font-bold truncate">{p.pageName}</div>
                           <div className="text-white/40 text-xs mt-1">Page ID: {p.pageId}</div>
+
                           {p.igId ? (
-                            <div className="text-white/40 text-xs mt-1">IG ID: {p.igId}</div>
+                            <div className="text-white/40 text-xs mt-1">
+                              IG ID: {p.igId}
+                              {p.igUsername ? ` • @${p.igUsername}` : ""}
+                            </div>
                           ) : (
                             <div className="text-amber-400/80 text-xs mt-1">
-                              No IG business account linked (or not exposed via API)
+                              No linked IG business account returned by Meta
                             </div>
                           )}
                         </div>
@@ -641,7 +690,7 @@ export default function ChannelConnections({ theme, setTheme }) {
                               checked={!!sel.connectInstagram}
                               onChange={() => toggle(p.pageId, "connectInstagram")}
                             />
-                            Instagram (linked)
+                            Instagram
                           </label>
                         </div>
                       </div>
@@ -651,7 +700,7 @@ export default function ChannelConnections({ theme, setTheme }) {
 
                 {!pages || pages.length === 0 ? (
                   <div className="text-white/50 text-sm">
-                    No pages returned. The Facebook user must be Admin of the Pages and permissions must be approved.
+                    No pages returned. The Facebook user must be admin of the pages and required permissions must be approved.
                   </div>
                 ) : null}
               </div>
@@ -665,6 +714,7 @@ export default function ChannelConnections({ theme, setTheme }) {
                 >
                   Cancel
                 </button>
+
                 <button
                   type="button"
                   className="bg-primary px-5 py-2.5 rounded-xl text-sm font-black text-background-dark hover:opacity-90 disabled:opacity-60"
