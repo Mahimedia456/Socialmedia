@@ -121,9 +121,9 @@ export default function Sidebar({ active = "dashboard" }) {
           <Item to="/feeds" icon="dynamic_feed" label="Feeds" active={active === "feeds"} />
         <Item to="/inbox" icon="inbox" label="Inbox" badge="12" active={active === "inbox"} />
         <Item to="/publisher" icon="send" label="Publisher" active={active === "publisher"} />
-        <Item to="/calendar" icon="calendar_today" label="Calendar" active={active === "calendar"} />
+        {/* <Item to="/calendar" icon="calendar_today" label="Calendar" active={active === "calendar"} /> */}
         <Item to="/analytics" icon="analytics" label="Analytics" active={active === "analytics"} />
-        <Item to="/contacts" icon="group" label="Contacts" active={active === "contacts"} />
+        {/* <Item to="/contacts" icon="group" label="Contacts" active={active === "contacts"} /> */}
 
         {/* Global Connections */}
         <Item

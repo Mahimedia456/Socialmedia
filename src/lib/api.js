@@ -1,6 +1,11 @@
 // src/lib/api.js
 
-const API_BASE = import.meta.env.VITE_API_BASE?.trim() || "http://localhost:4000";
+const RAW_API_BASE =
+  import.meta.env.VITE_API_BASE?.trim() ||
+  import.meta.env.VITE_API_URL?.trim() ||
+  "http://localhost:4000";
+
+export const API_BASE = RAW_API_BASE.replace(/\/+$/, "");
 
 /* =========================
    Session helpers
@@ -31,8 +36,11 @@ export function setSession({ access_token, refresh_token, user, permissions } = 
   }
 
   if (permissions !== undefined && permissions !== null) {
-    if (permissions) localStorage.setItem(STORAGE_KEYS.permissions, JSON.stringify(permissions));
-    else localStorage.removeItem(STORAGE_KEYS.permissions);
+    if (permissions) {
+      localStorage.setItem(STORAGE_KEYS.permissions, JSON.stringify(permissions));
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.permissions);
+    }
   }
 }
 
@@ -85,7 +93,9 @@ export function getActiveWorkspaceId() {
    ========================= */
 
 async function rawFetch(path, { method = "GET", body, headers = {}, token } = {}) {
-  const url = `${API_BASE}${path}`;
+  const cleanPath = String(path || "").startsWith("/") ? path : `/${String(path || "")}`;
+  const url = `${API_BASE}${cleanPath}`;
+
   const isFormData = typeof FormData !== "undefined" && body instanceof FormData;
   const hasBody = body !== undefined && body !== null;
 
@@ -106,7 +116,6 @@ async function rawFetch(path, { method = "GET", body, headers = {}, token } = {}
   if (isJson) {
     data = await res.json().catch(() => null);
   } else {
-    // Some endpoints may return plain text
     const text = await res.text().catch(() => "");
     data = text ? { text } : null;
   }
@@ -132,7 +141,6 @@ export async function apiFetch(path, opts = {}) {
   const { access_token, refresh_token } = getSession();
 
   try {
-    // try with access token by default
     return await rawFetch(path, { ...opts, token: opts.token ?? access_token });
   } catch (err) {
     const isAuthError = err?.status === 401;
@@ -140,7 +148,6 @@ export async function apiFetch(path, opts = {}) {
 
     if (!isAuthError || !canRefresh) throw err;
 
-    // refresh once
     const refreshed = await rawFetch("/api/auth/refresh-token", {
       method: "POST",
       body: { refresh_token },
@@ -155,7 +162,6 @@ export async function apiFetch(path, opts = {}) {
 
     setSession({ access_token: newAccess });
 
-    // retry original request
     return await rawFetch(path, { ...opts, token: newAccess });
   }
 }
@@ -228,7 +234,6 @@ export async function apiMetaExchange({ code, workspaceId }) {
 }
 
 export async function apiMetaConnectPages(payload) {
-  // payload: { workspaceId, user_access_token, selections, expires_in }
   return apiFetch("/api/meta/connect-pages", {
     method: "POST",
     body: payload,
@@ -273,6 +278,84 @@ export async function apiPublishNow(workspaceId, postId) {
 }
 
 /* =========================
+   Analytics
+   ========================= */
+
+export async function apiMetaAnalytics(workspaceId, { days = 30 } = {}) {
+  const wsId = String(workspaceId || "").trim();
+  const qs = new URLSearchParams({ days: String(days) });
+  return apiFetch(`/api/workspaces/${wsId}/analytics/meta?${qs.toString()}`);
+}
+
+/* =========================
+   Feeds
+   ========================= */
+
+export async function apiFacebookFeed(
+  workspaceId,
+  { page_channel_id, limit = 25, after = "" } = {}
+) {
+  const wsId = String(workspaceId || "").trim();
+  const qs = new URLSearchParams();
+  qs.set("page_channel_id", String(page_channel_id || ""));
+  qs.set("limit", String(limit));
+  if (after) qs.set("after", String(after));
+  return apiFetch(`/api/workspaces/${wsId}/feeds/facebook?${qs.toString()}`);
+}
+
+export async function apiFacebookComments(
+  workspaceId,
+  { page_channel_id, post_id, limit = 50, after = "" } = {}
+) {
+  const wsId = String(workspaceId || "").trim();
+  const qs = new URLSearchParams();
+  qs.set("page_channel_id", String(page_channel_id || ""));
+  qs.set("post_id", String(post_id || ""));
+  qs.set("limit", String(limit));
+  if (after) qs.set("after", String(after));
+  return apiFetch(`/api/workspaces/${wsId}/feeds/facebook/comments?${qs.toString()}`);
+}
+
+export async function apiFacebookLike(workspaceId, { page_channel_id, post_id }) {
+  const wsId = String(workspaceId || "").trim();
+  return apiFetch(`/api/workspaces/${wsId}/feeds/facebook/like`, {
+    method: "POST",
+    body: { page_channel_id, post_id },
+  });
+}
+
+export async function apiFacebookComment(workspaceId, { page_channel_id, post_id, message }) {
+  const wsId = String(workspaceId || "").trim();
+  return apiFetch(`/api/workspaces/${wsId}/feeds/facebook/comment`, {
+    method: "POST",
+    body: { page_channel_id, post_id, message },
+  });
+}
+
+export async function apiFacebookReplyComment(
+  workspaceId,
+  { page_channel_id, comment_id, message }
+) {
+  const wsId = String(workspaceId || "").trim();
+  return apiFetch(`/api/workspaces/${wsId}/feeds/facebook/comments/reply`, {
+    method: "POST",
+    body: { page_channel_id, comment_id, message },
+  });
+}
+
+export async function apiInstagramFeed(
+  workspaceId,
+  { ig_channel_id, limit = 25, after = "" } = {}
+) {
+  const wsId = String(workspaceId || "").trim();
+  const qs = new URLSearchParams();
+  qs.set("ig_channel_id", String(ig_channel_id || ""));
+  qs.set("limit", String(limit));
+  if (after) qs.set("after", String(after));
+  return apiFetch(`/api/workspaces/${wsId}/feeds/instagram?${qs.toString()}`);
+}
+
+/* =========================
    Inbox SSE + threads/messages
    ========================= */
 
@@ -288,23 +371,35 @@ export function inboxStreamUrl(workspaceId) {
 export async function apiInboxThreads(workspaceId, params = {}) {
   const wsId = String(workspaceId || "").trim();
   const qs = new URLSearchParams();
+
   Object.entries(params || {}).forEach(([k, v]) => {
     if (v === undefined || v === null || v === "" || v === "all") return;
     qs.set(k, String(v));
   });
+
   const suffix = qs.toString() ? `?${qs.toString()}` : "";
   return apiFetch(`/api/workspaces/${wsId}/inbox/threads${suffix}`);
 }
 
-export async function apiInboxMessages(threadId, { limit = 100 } = {}) {
+// Preferred workspace-scoped route
+export async function apiInboxMessages(workspaceId, threadId, { limit = 100 } = {}) {
+  const wsId = String(workspaceId || "").trim();
   const tId = String(threadId || "").trim();
   const qs = new URLSearchParams({ limit: String(limit) });
-  return apiFetch(`/api/inbox/threads/${tId}/messages?${qs.toString()}`);
+
+  try {
+    return await apiFetch(
+      `/api/workspaces/${wsId}/inbox/threads/${encodeURIComponent(tId)}/messages?${qs.toString()}`
+    );
+  } catch (err) {
+    // fallback to legacy route
+    return apiFetch(`/api/inbox/threads/${encodeURIComponent(tId)}/messages?${qs.toString()}`);
+  }
 }
 
 export async function apiSendInboxMessage(threadId, text) {
   const tId = String(threadId || "").trim();
-  return apiFetch(`/api/inbox/threads/${tId}/messages`, {
+  return apiFetch(`/api/inbox/threads/${encodeURIComponent(tId)}/messages`, {
     method: "POST",
     body: { text },
   });

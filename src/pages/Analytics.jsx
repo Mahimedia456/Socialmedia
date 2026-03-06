@@ -8,7 +8,8 @@ import { getSession } from "../lib/api.js";
 async function apiFetch(path) {
   const s = getSession?.();
   const token = s?.access_token || s?.accessToken || s?.token || "";
-  const base = import.meta.env.VITE_API_URL || "http://localhost:4000";
+  const base = import.meta.env.VITE_API_BASE?.trim();
+if (!base) throw new Error("Missing VITE_API_BASE");
 
   const r = await fetch(`${base}${path}`, {
     method: "GET",

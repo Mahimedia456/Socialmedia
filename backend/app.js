@@ -19,7 +19,9 @@ dotenv.config({ path: path.join(__dirname, ".env") });
 
 /* ---------------- Env ---------------- */
 const PORT = Number(process.env.PORT || 4000);
-const CORS_ORIGINS = (process.env.CORS_ORIGINS || "http://localhost:5173")
+
+// IMPORTANT: keep env var compatible with old value
+const EXTRA_ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || "http://localhost:5173")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
@@ -88,12 +90,68 @@ function providerMeta() {
 const app = express();
 app.set("trust proxy", 1);
 
+/* ============================================================
+   ✅ CORS FIX (Vercel + localhost + custom)
+   - Do NOT throw errors from CORS callback (breaks preflight)
+   - Allow *.vercel.app
+   - Allow explicit CORS_ORIGINS list
+============================================================ */
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // same-origin / server-side / Postman
+  if (origin.startsWith("http://localhost:")) return true;
+  if (origin.startsWith("http://127.0.0.1:")) return true;
+
+  // allow Vercel deployments
+  if (/^https:\/\/.*\.vercel\.app$/.test(origin)) return true;
+
+  // allow explicitly provided list
+  if (EXTRA_ALLOWED_ORIGINS.includes(origin)) return true;
+
+  return false;
+}
+
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      // IMPORTANT: never throw, just allow/deny by boolean
+      if (isAllowedOrigin(origin)) return cb(null, true);
+      return cb(null, false);
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
+// ✅ Ensure preflight always returns headers (fixes Vercel browser failures)
+app.options("*", cors());
+
+app.use(helmet());
+
+// ✅ IMPORTANT: keep Meta webhook RAW (for signature verification).
+app.use("/api/meta/webhook", express.raw({ type: "application/json" }));
+app.use("/api/webhooks/meta", express.raw({ type: "application/json" }));
+
+app.use(express.json({ limit: "2mb" }));
+app.use(cookieParser());
+
+// request log
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.url}`);
+  next();
+});
+
 /* ===================== INBOX MEMORY STORE (NO DB) ===================== */
 /**
- * inboxStore: Map<workspaceId, { threads: Map<threadId, thread>, messages: Map<threadId, Map<msgKey, msg>> }>
+ * ⚠️ NOTE:
+ * This in-memory store WILL RESET on Vercel/serverless cold starts.
+ * For stable production inbox, move to DB tables (inbox_threads/inbox_messages).
  */
 const inboxStore = new Map();
 
+/**
+ * inboxStore: Map<workspaceId, { threads: Map<threadId, thread>, messages: Map<threadId, Map<msgKey, msg>> }>
+ */
 function getWsStore(workspaceId) {
   const ws = String(workspaceId || "");
   if (!ws) return null;
@@ -991,36 +1049,6 @@ async function upsertInboundThreadAndMessageMemory({
   return { threadId };
 }
 
-/* ============================================================
-   MIDDLEWARES
-============================================================ */
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      // allow same-origin / server-side / Postman
-      if (!origin) return cb(null, true);
-      if (CORS_ORIGINS.includes(origin)) return cb(null, true);
-      return cb(new Error(`CORS blocked for origin: ${origin}`));
-    },
-    credentials: true,
-  })
-);
-
-app.use(helmet());
-
-// ✅ IMPORTANT: keep Meta webhook RAW (for signature verification).
-app.use("/api/meta/webhook", express.raw({ type: "application/json" }));
-app.use("/api/webhooks/meta", express.raw({ type: "application/json" }));
-
-app.use(express.json({ limit: "2mb" }));
-app.use(cookieParser());
-
-// request log
-app.use((req, res, next) => {
-  console.log(`${req.method} ${req.url}`);
-  next();
-});
-
 /* ---------------- Health ---------------- */
 app.get("/api/health", (req, res) =>
   res.json({
@@ -1031,6 +1059,7 @@ app.get("/api/health", (req, res) =>
     meta_webhook: !!META_VERIFY_TOKEN,
     inbox_storage: "memory+sse",
     publisher: true,
+    cors_extra: EXTRA_ALLOWED_ORIGINS,
   })
 );
 
@@ -1250,6 +1279,7 @@ app.get(
 );
 
 // Instagram media feed (IG Graph API)
+// Instagram media feed (IG Graph API)
 app.get(
   "/api/workspaces/:workspaceId/feeds/instagram",
   requireAuth,
@@ -1271,7 +1301,9 @@ app.get(
       }
 
       const ch = await getChannelById({ workspaceId, channelId: ig_channel_id });
-      if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
+      if (!ch) {
+        return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
+      }
 
       if (
         ch.provider !== provider ||
@@ -1284,23 +1316,64 @@ app.get(
         });
       }
 
-      const igUserId = String(ch.external_id);
+      // ✅ Support both old and new storage formats
+      // New format:
+      //   external_id = igUserId
+      //   meta.page_id = pageId
+      //
+      // Old format:
+      //   external_id = pageId
+      //   meta.ig_user_id = igUserId
 
-      // stored under external_id=igUserId token_type=page (page token)
-      const token = await getTokenFromDB({
+      const pageIdFromMeta = String(ch?.meta?.page_id || "");
+      const igUserIdFromMeta = String(ch?.meta?.ig_user_id || "");
+      const externalId = String(ch.external_id || "");
+
+      // prefer real IG user id from meta, otherwise external_id
+      const igUserId = igUserIdFromMeta || externalId;
+
+      if (!igUserId) {
+        return res.status(400).json({
+          error: "IG_CONFIG_ERROR",
+          message: "Instagram channel missing ig user id. Reconnect channel.",
+        });
+      }
+
+      // token may be stored against igUserId OR old pageId storage
+      let token = await getTokenFromDB({
         workspaceId,
         externalId: igUserId,
         token_type: "page",
       });
 
-      if (!token)
-        return res
-          .status(400)
-          .json({ error: "MISSING_TOKEN", message: "Missing IG token" });
+      if (!token && pageIdFromMeta) {
+        token = await getTokenFromDB({
+          workspaceId,
+          externalId: pageIdFromMeta,
+          token_type: "page",
+        });
+      }
+
+      // very old row fallback: external_id may itself be pageId
+      if (!token && externalId && externalId !== igUserId) {
+        token = await getTokenFromDB({
+          workspaceId,
+          externalId,
+          token_type: "page",
+        });
+      }
+
+      if (!token) {
+        return res.status(400).json({
+          error: "MISSING_TOKEN",
+          message: "Missing IG token",
+        });
+      }
 
       const url = new URL(
         `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media`
       );
+
       url.searchParams.set(
         "fields",
         [
@@ -1316,14 +1389,22 @@ app.get(
           "comments_count",
         ].join(",")
       );
+
       url.searchParams.set("limit", String(limit));
       if (after) url.searchParams.set("after", after);
       url.searchParams.set("access_token", token);
 
       const j = await metaGet(url.toString());
+
       return res.json({
         ok: true,
-        channel: { id: ch.id, display_name: ch.display_name, external_id: igUserId },
+        channel: {
+          id: ch.id,
+          display_name: ch.display_name,
+          external_id: ch.external_id,
+          ig_user_id: igUserId,
+          page_id: pageIdFromMeta || null,
+        },
         data: j?.data || [],
         paging: j?.paging || null,
       });
@@ -1333,9 +1414,7 @@ app.get(
   }
 );
 
-/* ---------------- Facebook: Fetch comments for a post ----------------
-   GET /feeds/facebook/comments?page_channel_id=...&post_id=...&limit=50&after=...
-*/
+/* ---------------- Facebook: Fetch comments for a post ---------------- */
 app.get(
   "/api/workspaces/:workspaceId/feeds/facebook/comments",
   requireAuth,
@@ -1408,10 +1487,7 @@ app.get(
   }
 );
 
-/* ---------------- Facebook: Reply to a comment ----------------
-   POST /feeds/facebook/comments/reply
-   body: { page_channel_id, comment_id, message }
-*/
+/* ---------------- Facebook: Reply to a comment ---------------- */
 app.post(
   "/api/workspaces/:workspaceId/feeds/facebook/comments/reply",
   requireAuth,
@@ -1469,10 +1545,7 @@ app.post(
   }
 );
 
-/* ---------------- Facebook: Like a post ----------------
-   POST /feeds/facebook/like
-   body: { page_channel_id, post_id }
-*/
+/* ---------------- Facebook: Like a post ---------------- */
 app.post(
   "/api/workspaces/:workspaceId/feeds/facebook/like",
   requireAuth,
@@ -1524,10 +1597,7 @@ app.post(
   }
 );
 
-/* ---------------- Facebook: Comment on a post ----------------
-   POST /feeds/facebook/comment
-   body: { page_channel_id, post_id, message }
-*/
+/* ---------------- Facebook: Comment on a post ---------------- */
 app.post(
   "/api/workspaces/:workspaceId/feeds/facebook/comment",
   requireAuth,
@@ -1639,11 +1709,9 @@ async function handleMetaWebhookPost(req, res) {
     const errors = [];
 
     function extractMessagingEvents(entry) {
-      // page webhooks usually have entry.messaging[]
       const m = Array.isArray(entry?.messaging) ? entry.messaging : [];
       if (m.length) return m;
 
-      // IG webhooks often have entry.changes[]
       const changes = Array.isArray(entry?.changes) ? entry.changes : [];
       const out = [];
 
@@ -1668,7 +1736,6 @@ async function handleMetaWebhookPost(req, res) {
         continue;
       }
 
-      // object can be "page" or "instagram"
       const platform = objectType === "instagram" ? "instagram" : "facebook";
 
       const channel = await findChannelByExternalId({
@@ -1678,7 +1745,6 @@ async function handleMetaWebhookPost(req, res) {
       });
 
       if (!channel) {
-        // If ignored increases: your channel.external_id doesn't match webhook entry.id
         ignored += 1;
         continue;
       }
@@ -1748,7 +1814,6 @@ async function handleMetaWebhookPost(req, res) {
     return res.status(200).json({ ok: true, processed, ignored, errors });
   } catch (e) {
     console.error("META WEBHOOK ERROR:", e?.message || e);
-    // Meta expects 200 quickly
     return res.status(200).json({ ok: false, error: "WEBHOOK_HANDLER_FAILED" });
   }
 }
@@ -2167,6 +2232,7 @@ app.post("/api/meta/connect-pages", requireAuth, async (req, res, next) => {
           updated_at: new Date().toISOString(),
         });
 
+        // IMPORTANT: store page token under IG external_id as you already do
         if (pageToken) {
           tokenRows.push({
             workspace_id: workspaceId,
@@ -2665,7 +2731,6 @@ app.get("/api/workspaces/:workspaceId/inbox/stream", async (req, res) => {
       if (!role) return res.status(403).json({ error: "WORKSPACE_FORBIDDEN" });
     }
 
-    // ✅ Prevent proxy buffering (ngrok / nginx)
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
@@ -2734,7 +2799,29 @@ app.get(
   }
 );
 
-// Read messages from memory
+// ✅ Workspace-friendly alias (helps if you switch frontend later)
+app.get(
+  "/api/workspaces/:workspaceId/inbox/threads/:threadId/messages",
+  requireAuth,
+  requireWorkspaceAccess,
+  async (req, res) => {
+    const { workspaceId, threadId } = req.params;
+    const limit = Math.min(500, Math.max(1, Number(req.query.limit || 100)));
+
+    const ws = getWsStore(workspaceId);
+    if (!ws || !ws.threads.has(threadId))
+      return res.status(404).json({ error: "THREAD_NOT_FOUND" });
+
+    const rows = listMessagesFromMemory(workspaceId, threadId)
+      .slice()
+      .sort((a, b) => tsNum(a.sent_at) - tsNum(b.sent_at))
+      .slice(-limit);
+
+    return res.json({ messages: rows });
+  }
+);
+
+// Read messages from memory (legacy route your frontend uses)
 app.get("/api/inbox/threads/:threadId/messages", requireAuth, async (req, res, next) => {
   try {
     const { threadId } = req.params;
@@ -3040,6 +3127,7 @@ app.post(
         let convos = [];
         let usedFallback = false;
 
+        // 1) try IG endpoint
         try {
           convos = await fetchAllIgConversations({
             igUserId,
@@ -3047,9 +3135,11 @@ app.post(
             maxConvos: 200,
           });
         } catch (e1) {
+          // 2) fallback to PAGE conversations with platform=instagram (requires page_id in meta)
           try {
             if (!pageIdForIg)
               throw new Error("IG channel meta.page_id missing (needed for fallback)");
+
             convos = await fetchAllPageConversations({
               pageId: pageIdForIg,
               pageToken: igToken,
@@ -3059,15 +3149,16 @@ app.post(
             usedFallback = true;
           } catch (e2) {
             const code = e1?.meta?.code || e1?.meta?.error?.code || null;
-            console.warn("IG CONVO FETCH FAILED (both):", e1?.message, e1?.meta || "");
             igErrors.push({
               igUserId,
               message: e1?.message || "IG conversations fetch failed",
               meta: e1?.meta || null,
               hint:
-                Number(code) === 3
-                  ? "Meta app lacks Instagram Messaging capability (needs product setup + app review/permissions)."
-                  : "Check token scopes + app mode + IG professional account + permissions.",
+                Number(code) === 10 || Number(code) === 200
+                  ? "Missing permissions/scopes for Instagram Messaging."
+                  : Number(code) === 3
+                  ? "Endpoint unsupported: Instagram Messaging product not enabled or app review missing."
+                  : "Check IG professional account + connected page + app mode + permissions.",
               fallback_error: { message: e2?.message || "Fallback failed" },
             });
             continue;
@@ -3131,7 +3222,6 @@ app.post(
               maxMsgs: 200,
             });
           } catch (e) {
-            console.warn("IG MSG FETCH FAILED:", e?.message, e?.meta || "");
             igErrors.push({
               igUserId,
               conversationId: externalThreadId,
