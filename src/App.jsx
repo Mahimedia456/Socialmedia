@@ -9,10 +9,11 @@ import ForgotPassword from "./pages/auth/ForgotPassword.jsx";
 import ResetPassword from "./pages/auth/ResetPassword.jsx";
 import VerifyEmail from "./pages/auth/VerifyEmail.jsx";
 import MetaCallback from "./pages/auth/MetaCallback.jsx";
+import TikTokCallback from "./pages/auth/TikTokCallback.jsx"; // ✅ NEW
 
 // MAIN
 import Dashboard from "./pages/Dashboard.jsx";
-import Feeds from "./pages/Feeds.jsx"; // ✅ added
+import Feeds from "./pages/Feeds.jsx";
 import Inbox from "./pages/Inbox.jsx";
 import ConversationDetail from "./pages/ConversationDetail.jsx";
 import Publisher from "./pages/Publisher.jsx";
@@ -25,14 +26,14 @@ import Settings from "./pages/Settings.jsx";
 import InboxRules from "./pages/InboxRules.jsx";
 import TeamRoles from "./pages/TeamRoles.jsx";
 
-// WORKSPACES (moved)
+// WORKSPACES
 import WorkspacesList from "./pages/workspaces/WorkspacesList.jsx";
 import CreateWorkspace from "./pages/workspaces/CreateWorkspace.jsx";
 import WorkspaceOverview from "./pages/workspaces/WorkspaceOverview.jsx";
 import WorkspaceTeam from "./pages/workspaces/WorkspaceTeam.jsx";
 import WorkspaceSettings from "./pages/workspaces/WorkspaceSettings.jsx";
 
-// CONNECTIONS (moved)
+// CONNECTIONS
 import ChannelConnections from "./pages/connections/ChannelConnections.jsx";
 
 // LEGAL
@@ -88,6 +89,16 @@ export default function App() {
         }
       />
 
+      {/* ✅ TikTok callback */}
+      <Route
+        path="/auth/tiktok/callback"
+        element={
+          <RequireAuth>
+            <TikTokCallback />
+          </RequireAuth>
+        }
+      />
+
       {/* Legal */}
       <Route
         path="/privacy-policy"
@@ -108,7 +119,6 @@ export default function App() {
         }
       />
 
-      {/* ✅ Added because Sidebar uses /feeds */}
       <Route
         path="/feeds"
         element={
@@ -126,6 +136,7 @@ export default function App() {
           </RequireAuth>
         }
       />
+
       <Route
         path="/conversations/:id"
         element={
@@ -143,6 +154,7 @@ export default function App() {
           </RequireAuth>
         }
       />
+
       <Route
         path="/calendar"
         element={
@@ -151,6 +163,7 @@ export default function App() {
           </RequireAuth>
         }
       />
+
       <Route
         path="/analytics"
         element={
@@ -159,6 +172,7 @@ export default function App() {
           </RequireAuth>
         }
       />
+
       <Route
         path="/contacts"
         element={
@@ -187,6 +201,7 @@ export default function App() {
           </RequireAuth>
         }
       />
+
       <Route
         path="/settings/inbox-rules"
         element={
@@ -195,6 +210,7 @@ export default function App() {
           </RequireAuth>
         }
       />
+
       <Route
         path="/settings/team-roles"
         element={
@@ -213,7 +229,9 @@ export default function App() {
           </RequireAuth>
         }
       />
+
       <Route path="/workspaces/create" element={<Navigate to="/workspaces/new" replace />} />
+
       <Route
         path="/workspaces/new"
         element={
@@ -232,6 +250,7 @@ export default function App() {
           </RequireAuth>
         }
       />
+
       <Route
         path="/workspaces/:workspaceId/connections"
         element={
@@ -240,6 +259,7 @@ export default function App() {
           </RequireAuth>
         }
       />
+
       <Route
         path="/workspaces/:workspaceId/settings"
         element={
@@ -248,6 +268,7 @@ export default function App() {
           </RequireAuth>
         }
       />
+
       <Route
         path="/workspaces/:workspaceId"
         element={
@@ -266,10 +287,6 @@ export default function App() {
   );
 }
 
-/**
- * ✅ tiny helper: prevents accidental "undefined is not a function" if something passes wrong setTheme
- * (optional safety)
- */
 function setsetThemeSafe(setTheme) {
   return typeof setTheme === "function" ? setTheme : () => {};
 }
