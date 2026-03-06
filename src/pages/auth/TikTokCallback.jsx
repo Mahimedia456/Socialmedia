@@ -1,92 +1,59 @@
-// src/pages/TikTokCallback.jsx
-import React, { useEffect, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
-import AppShell from "../components/AppShell.jsx";
-import { apiFetch, setActiveWorkspaceId } from "../lib/api.js";
-import {
-  clearTikTokOAuthState,
-  validateStoredTikTokState,
-} from "../lib/tiktokConnect.js";
+import { useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 
-export default function TikTokCallback({ theme, setTheme }) {
+export default function TikTokCallback() {
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
-
-  const [status, setStatus] = useState("Connecting TikTok...");
-  const [err, setErr] = useState("");
 
   useEffect(() => {
-    (async () => {
+    async function handleTikTok() {
+      const params = new URLSearchParams(window.location.search);
+
+      const code = params.get("code");
+      const state = params.get("state");
+
+      if (!code) {
+        navigate("/connections");
+        return;
+      }
+
+      const accessToken = localStorage.getItem("access_token");
+
       try {
-        const code = String(searchParams.get("code") || "");
-        const state = String(searchParams.get("state") || "");
-        const error = String(searchParams.get("error") || "");
-        const errorDescription = String(
-          searchParams.get("error_description") || ""
+        const res = await fetch(
+          `${import.meta.env.VITE_API_BASE}/api/tiktok/exchange`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${accessToken}`,
+            },
+            body: JSON.stringify({
+              code,
+              state,
+            }),
+          }
         );
 
-        if (error) {
-          throw new Error(errorDescription || error);
-        }
-
-        if (!code) {
-          throw new Error("Missing TikTok authorization code.");
-        }
-
-        const stateCheck = validateStoredTikTokState(state);
-        if (!stateCheck.ok || !stateCheck.parsed?.workspaceId) {
-          throw new Error("Invalid or expired TikTok state.");
-        }
-
-        const workspaceId = String(stateCheck.parsed.workspaceId);
-        setActiveWorkspaceId(workspaceId);
-
-        setStatus("Exchanging TikTok token...");
-
-        const result = await apiFetch("/api/tiktok/exchange", {
-          method: "POST",
-          body: {
-            code,
-            workspaceId,
-          },
-        });
-
-        clearTikTokOAuthState();
+        const data = await res.json();
 
         localStorage.setItem(
           "tiktok_exchange_result",
-          JSON.stringify({
-            ...result,
-            workspaceId,
-          })
+          JSON.stringify(data)
         );
 
-        setStatus("TikTok connected successfully.");
-
-        setTimeout(() => {
-          navigate("/connections");
-        }, 800);
-      } catch (e) {
-        clearTikTokOAuthState();
-        setErr(String(e?.message || e));
-        setStatus("TikTok connection failed.");
+        navigate("/connections");
+      } catch (err) {
+        console.error("TikTok connect error:", err);
+        navigate("/connections");
       }
-    })();
-  }, [navigate, searchParams]);
+    }
+
+    handleTikTok();
+  }, []);
 
   return (
-    <AppShell theme={theme} setTheme={setTheme} active="connections">
-      <div className="min-h-[70vh] flex items-center justify-center p-8">
-        <div className="glass-panel border border-white/10 rounded-2xl p-8 max-w-xl w-full">
-          <h2 className="text-2xl font-black text-white">TikTok Callback</h2>
-          <p className="text-white/70 mt-3">{status}</p>
-          {err ? (
-            <pre className="mt-4 text-sm text-red-300 whitespace-pre-wrap">
-              {err}
-            </pre>
-          ) : null}
-        </div>
-      </div>
-    </AppShell>
+    <div className="flex items-center justify-center h-screen text-white">
+      Connecting TikTok...
+    </div>
   );
 }
