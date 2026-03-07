@@ -230,7 +230,6 @@ async function tiktokGetUserInfo({ accessToken }) {
 
   return user;
 }
-
 function safeJsonParse(v, fallback = null) {
   try {
     return JSON.parse(v);
@@ -260,6 +259,9 @@ function parseOAuthState(stateRaw) {
 const app = express();
 app.set("trust proxy", 1);
 
+/* ============================================================
+   ✅ CORS FIX (Vercel + localhost + custom)
+============================================================ */
 /* ============================================================
    ✅ CORS FIX (Vercel + localhost + custom)
 ============================================================ */
@@ -1338,6 +1340,7 @@ async function upsertInboundThreadAndMessageMemory({
 }) {
   const now = new Date().toISOString();
 
+  // Webhook doesn't reliably give "conversation id". Group by participant per channel.
   const externalThreadId = `p_${String(participantExternalId || "unknown")}`;
   const threadId = buildThreadId({
     provider,
@@ -2223,6 +2226,7 @@ app.get(
         });
       }
 
+      // Support both old and new storage formats
       const pageIdFromMeta = String(ch?.meta?.page_id || "");
       const igUserIdFromMeta = String(ch?.meta?.ig_user_id || "");
       const externalId = String(ch.external_id || "");
@@ -2762,6 +2766,7 @@ app.post("/api/auth/login", async (req, res, next) => {
     const refresh_token = signRefresh(payload);
     await setRefreshToken(user.id, refresh_token);
 
+    // ✅ LOGIN RESPONSE IMMEDIATELY
     res.json({
       access_token,
       refresh_token,
@@ -2772,6 +2777,7 @@ app.post("/api/auth/login", async (req, res, next) => {
       },
     });
 
+    // ✅ BACKGROUND AUTO SYNC
     setTimeout(() => {
       runLoginAutoSyncInBackground({ userId: user.id, role: user.role });
     }, 0);
@@ -3205,9 +3211,105 @@ app.post("/api/meta/connect-pages", requireAuth, async (req, res, next) => {
   }
 });
 
+
+
 /* ============================================================
    TIKTOK CONNECT APIs
 ============================================================ */
+
+async function tiktokTokenExchange({ code }) {
+  const body = new URLSearchParams({
+    client_key: TIKTOK_CLIENT_KEY,
+    client_secret: TIKTOK_CLIENT_SECRET,
+    code,
+    grant_type: "authorization_code",
+    redirect_uri: TIKTOK_REDIRECT_URI,
+  });
+
+  const r = await fetch("https://open.tiktokapis.com/v2/oauth/token/", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      "Cache-Control": "no-cache",
+    },
+    body: body.toString(),
+  });
+
+  const raw = await r.text();
+  let j = {};
+  try {
+    j = raw ? JSON.parse(raw) : {};
+  } catch {
+    j = { raw };
+  }
+
+  console.log("TIKTOK TOKEN RESPONSE:", {
+    ok: r.ok,
+    status: r.status,
+    body: j,
+  });
+
+  if (!r.ok) {
+    const msg =
+      j?.error_description ||
+      j?.message ||
+      j?.error ||
+      j?.data?.description ||
+      "TikTok token exchange failed";
+    const e = new Error(msg);
+    e.meta = j;
+    throw e;
+  }
+
+  return j;
+}
+
+async function tiktokGetUserInfo({ accessToken }) {
+  const r = await fetch("https://open-api.tiktok.com/user/info/", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-cache",
+    },
+    body: JSON.stringify({
+      access_token: accessToken,
+      fields: [
+        "open_id",
+        "display_name",
+        "avatar_url",
+        "bio_description",
+        "profile_deep_link",
+      ],
+    }),
+  });
+
+  const raw = await r.text();
+  let j = {};
+  try {
+    j = raw ? JSON.parse(raw) : {};
+  } catch {
+    j = { raw };
+  }
+
+  console.log("TIKTOK USER INFO RESPONSE:", {
+    ok: r.ok,
+    status: r.status,
+    body: j,
+  });
+
+  const apiErrorCode = Number(j?.error?.code || -1);
+  const apiErrorMessage =
+    j?.error?.message || j?.message || "TikTok user info fetch failed";
+
+  if (!r.ok || apiErrorCode !== 0) {
+    const e = new Error(apiErrorMessage);
+    e.meta = j;
+    throw e;
+  }
+
+  return j?.data?.user || null;
+}
+
 app.post("/api/tiktok/exchange", requireAuth, async (req, res, next) => {
   try {
     const code = String(req.body?.code || "").trim();
@@ -3369,6 +3471,7 @@ app.post("/api/tiktok/exchange", requireAuth, async (req, res, next) => {
   }
 });
 
+
 /* ============================================================
    META ANALYTICS HELPERS + API
 ============================================================ */
@@ -3408,9 +3511,10 @@ app.get(
         },
       };
 
-      const chartMap = new Map();
+      const chartMap = new Map(); // yyyy-mm-dd -> value
       const top_posts = [];
 
+      // FACEBOOK
       for (const ch of channels || []) {
         if (ch.platform !== "facebook") continue;
 
@@ -3454,6 +3558,7 @@ app.get(
         }
       }
 
+      // INSTAGRAM
       for (const ch of channels || []) {
         if (ch.platform !== "instagram") continue;
 
@@ -3636,7 +3741,7 @@ app.post(
         ? req.body.channel_ids
         : [];
 
-      const action = String(req.body?.action || "draft");
+      const action = String(req.body?.action || "draft"); // draft | scheduled | publish_now
       const scheduled_at = req.body?.scheduled_at
         ? new Date(req.body.scheduled_at).toISOString()
         : null;
