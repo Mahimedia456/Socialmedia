@@ -285,35 +285,54 @@ export default function ChannelConnections({ theme, setTheme }) {
   }, []);
 
   // TikTokCallback result
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem("tiktok_exchange_result");
-      if (!raw) return;
+ useEffect(() => {
+  try {
+    const raw = localStorage.getItem("tiktok_exchange_result");
+    if (!raw) return;
 
-      localStorage.removeItem("tiktok_exchange_result");
+    localStorage.removeItem("tiktok_exchange_result");
 
-      const j = JSON.parse(raw || "{}");
-      const stWsId = String(j?.workspaceId || "");
+    const j = JSON.parse(raw || "{}");
+    const stWsId = String(j?.workspaceId || "");
 
-      if (!stWsId) {
-        setErr("TikTok connect failed: missing workspaceId in exchange result.");
-        return;
-      }
+    if (!j?.ok) {
+      setErr(
+        String(
+          j?.error ||
+            j?.message ||
+            "TikTok connect failed. Check backend logs."
+        )
+      );
 
-      if (stWsId !== workspaceId) {
+      if (stWsId && stWsId !== workspaceId) {
         setWorkspaceId(stWsId);
         localStorage.setItem("active_workspace_id", stWsId);
       }
 
-      setTimeout(() => {
-        loadChannels(stWsId);
-      }, 0);
-    } catch (e) {
-      console.error("Failed to read tiktok_exchange_result:", e);
-      setErr("TikTok connect failed: could not parse exchange result.");
+      return;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+
+    if (!stWsId) {
+      setErr("TikTok connect failed: missing workspaceId in exchange result.");
+      return;
+    }
+
+    if (stWsId !== workspaceId) {
+      setWorkspaceId(stWsId);
+      localStorage.setItem("active_workspace_id", stWsId);
+    }
+
+    setErr("");
+
+    setTimeout(() => {
+      loadChannels(stWsId);
+    }, 0);
+  } catch (e) {
+    console.error("Failed to read tiktok_exchange_result:", e);
+    setErr("TikTok connect failed: could not parse exchange result.");
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, []);
 
   function toggle(pageId, key) {
     setSelections((prev) => ({

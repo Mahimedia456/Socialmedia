@@ -94,7 +94,7 @@ export async function tiktokGetUserInfo({ accessToken }) {
   const url = new URL("https://open.tiktokapis.com/v2/user/info/");
   url.searchParams.set(
     "fields",
-    "open_id,union_id,display_name,avatar_url,bio_description,profile_deep_link"
+    "open_id,union_id,avatar_url,display_name"
   );
 
   const r = await fetch(url.toString(), {
@@ -124,6 +124,7 @@ export async function tiktokGetUserInfo({ accessToken }) {
       j?.error?.message ||
       j?.error_description ||
       j?.message ||
+      j?.error?.code ||
       "TikTok user info fetch failed";
     const e = new Error(msg);
     e.meta = j;

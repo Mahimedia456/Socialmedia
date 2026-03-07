@@ -1,5 +1,4 @@
 // backend/routes/tiktok.routes.js
-
 import express from "express";
 import {
   providerTikTok,
@@ -59,6 +58,7 @@ export default function createTikTokRouter({
       const expiresIn = Number(tokenData?.expires_in || 0);
       const refreshExpiresIn = Number(tokenData?.refresh_expires_in || 0);
       const openIdFromToken = String(tokenData?.open_id || "").trim();
+      const scope = String(tokenData?.scope || "").trim();
 
       let user = null;
       try {
@@ -84,7 +84,7 @@ export default function createTikTokRouter({
       }
 
       const displayName = String(
-        user?.display_name || tokenData?.display_name || "TikTok Account"
+        user?.display_name || "TikTok Account"
       ).trim();
 
       const provider = providerTikTok();
@@ -102,7 +102,7 @@ export default function createTikTokRouter({
         workspace_id: workspaceId,
         provider,
         platform: "tiktok",
-        display_name: displayName,
+        display_name: displayName || "TikTok Account",
         external_id: externalId,
         status: channelStatusConnected,
         meta: {
@@ -110,8 +110,7 @@ export default function createTikTokRouter({
           open_id: externalId,
           union_id: user?.union_id || null,
           avatar_url: user?.avatar_url || null,
-          bio_description: user?.bio_description || null,
-          profile_deep_link: user?.profile_deep_link || null,
+          scope: scope || null,
           raw_user: user || null,
         },
         updated_at: nowIso,
@@ -125,7 +124,10 @@ export default function createTikTokRouter({
         .select("*")
         .maybeSingle();
 
-      if (chErr) throw chErr;
+      if (chErr) {
+        chErr.message = `workspace_channels upsert failed: ${chErr.message}`;
+        throw chErr;
+      }
 
       const tokenRows = [
         {
@@ -157,7 +159,10 @@ export default function createTikTokRouter({
           onConflict: "workspace_id,provider,external_id,token_type",
         });
 
-      if (tokErr) throw tokErr;
+      if (tokErr) {
+        tokErr.message = `channel_tokens upsert failed: ${tokErr.message}`;
+        throw tokErr;
+      }
 
       return res.json({
         ok: true,
@@ -171,12 +176,16 @@ export default function createTikTokRouter({
           avatar_url: user?.avatar_url || "",
         },
         user: user || null,
+        scope: scope || null,
         expires_in: expiresIn || null,
       });
     } catch (e) {
       console.error("TIKTOK EXCHANGE ERROR:", {
         message: e?.message || "Unknown TikTok exchange error",
         meta: e?.meta || null,
+        details: e?.details || null,
+        hint: e?.hint || null,
+        code: e?.code || null,
         stack: e?.stack || null,
       });
       next(e);
