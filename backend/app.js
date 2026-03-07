@@ -3077,9 +3077,7 @@ app.post("/api/meta/connect-pages", requireAuth, async (req, res, next) => {
 });
 
 
-/* ============================================================
-   TIKTOK CONNECT APIs
-============================================================ */
+
 /* ============================================================
    TIKTOK CONNECT APIs
 ============================================================ */
@@ -3131,6 +3129,250 @@ async function tiktokTokenExchange({ code }) {
   return j;
 }
 
+async function tiktokGetUserInfo({ accessToken }) {
+  const r = await fetch("https://open-api.tiktok.com/user/info/", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-cache",
+    },
+    body: JSON.stringify({
+      access_token: accessToken,
+      fields: [
+        "open_id",
+        "display_name",
+        "avatar_url",
+        "bio_description",
+        "profile_deep_link",
+      ],
+    }),
+  });
+
+  const raw = await r.text();
+  let j = {};
+  try {
+    j = raw ? JSON.parse(raw) : {};
+  } catch {
+    j = { raw };
+  }
+
+  console.log("TIKTOK USER INFO RESPONSE:", {
+    ok: r.ok,
+    status: r.status,
+    body: j,
+  });
+
+  const apiErrorCode = Number(j?.error?.code || -1);
+  const apiErrorMessage =
+    j?.error?.message || j?.message || "TikTok user info fetch failed";
+
+  if (!r.ok || apiErrorCode !== 0) {
+    const e = new Error(apiErrorMessage);
+    e.meta = j;
+    throw e;
+  }
+
+  return j?.data?.user || null;
+}
+
+app.post("/api/tiktok/exchange", requireAuth, async (req, res, next) => {
+  try {
+    const code = String(req.body?.code || "").trim();
+    const stateRaw = String(req.body?.state || "").trim();
+    let workspaceId = String(req.body?.workspaceId || "").trim();
+
+    if (!code) {
+      return res.status(400).json({
+        error: "VALIDATION_ERROR",
+        message: "code is required",
+      });
+    }
+
+    if (!workspaceId && stateRaw) {
+      const parsedState = parseOAuthState(stateRaw);
+      workspaceId = String(parsedState?.workspaceId || "").trim();
+    }
+
+    if (!workspaceId) {
+      return res.status(400).json({
+        error: "VALIDATION_ERROR",
+        message: "workspaceId missing in body/state",
+      });
+    }
+
+    if (!isGlobalAdmin(req.auth.role)) {
+      const role = await getWorkspaceMemberRole(req.auth.userId, workspaceId);
+      if (!role) {
+        return res.status(403).json({ error: "WORKSPACE_FORBIDDEN" });
+      }
+    }
+
+    if (!TIKTOK_CLIENT_KEY || !TIKTOK_CLIENT_SECRET || !TIKTOK_REDIRECT_URI) {
+      return res.status(500).json({
+        error: "TIKTOK_ENV_MISSING",
+        message:
+          "Missing TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET / TIKTOK_REDIRECT_URI in backend env",
+      });
+    }
+
+    const tokenData = await tiktokTokenExchange({ code });
+
+    const accessToken = String(tokenData?.access_token || "").trim();
+    const refreshToken = String(tokenData?.refresh_token || "").trim();
+    const expiresIn = Number(tokenData?.expires_in || 0);
+    const refreshExpiresIn = Number(tokenData?.refresh_expires_in || 0);
+    const openIdFromToken = String(
+      tokenData?.open_id || tokenData?.openid || ""
+    ).trim();
+
+    if (!accessToken) {
+      return res.status(400).json({
+        error: "TIKTOK_TOKEN_FAILED",
+        message: "TikTok did not return access_token",
+        meta: tokenData,
+      });
+    }
+
+    let user = null;
+    try {
+      user = await tiktokGetUserInfo({ accessToken });
+    } catch (userErr) {
+      console.warn("TIKTOK USER INFO FAILED:", {
+        message: userErr?.message || "Unknown user info error",
+        meta: userErr?.meta || null,
+      });
+
+      if (!openIdFromToken) {
+        throw userErr;
+      }
+    }
+
+    const externalId = String(user?.open_id || openIdFromToken || "").trim();
+
+    if (!externalId) {
+      return res.status(400).json({
+        error: "TIKTOK_OPEN_ID_MISSING",
+        message: "TikTok did not return open_id",
+        meta: { tokenData, user },
+      });
+    }
+
+    const displayName = String(user?.display_name || "TikTok Account").trim();
+    const avatarUrl = String(user?.avatar_url || "").trim();
+    const bioDescription = String(user?.bio_description || "").trim();
+    const profileDeepLink = String(user?.profile_deep_link || "").trim();
+
+    const provider = providerTikTok();
+    const nowIso = new Date().toISOString();
+
+    const accessExpiresAt = expiresIn
+      ? new Date(Date.now() + expiresIn * 1000).toISOString()
+      : null;
+
+    const refreshExpiresAt = refreshExpiresIn
+      ? new Date(Date.now() + refreshExpiresIn * 1000).toISOString()
+      : null;
+
+    const channelPayload = {
+      workspace_id: workspaceId,
+      provider,
+      platform: "tiktok",
+      display_name: displayName,
+      external_id: externalId,
+      status: CHANNEL_STATUS_CONNECTED,
+      meta: {
+        type: "tiktok_account",
+        open_id: externalId,
+        avatar_url: avatarUrl || null,
+        bio_description: bioDescription || null,
+        profile_deep_link: profileDeepLink || null,
+        raw_user: user || null,
+      },
+      updated_at: nowIso,
+    };
+
+    const { data: upsertedChannel, error: chErr } = await supabase
+      .from(T_CHANNELS)
+      .upsert([channelPayload], {
+        onConflict: "workspace_id,provider,platform,external_id",
+      })
+      .select("*")
+      .maybeSingle();
+
+    if (chErr) {
+      console.error("TIKTOK CHANNEL UPSERT ERROR:", chErr);
+      throw chErr;
+    }
+
+    const { error: accessTokErr } = await supabase
+      .from(T_CHANNEL_TOKENS)
+      .upsert(
+        [
+          {
+            workspace_id: workspaceId,
+            provider,
+            external_id: externalId,
+            token_type: "access",
+            access_token: accessToken,
+            expires_at: accessExpiresAt,
+            updated_at: nowIso,
+          },
+        ],
+        { onConflict: "workspace_id,provider,external_id,token_type" }
+      );
+
+    if (accessTokErr) {
+      console.error("TIKTOK ACCESS TOKEN UPSERT ERROR:", accessTokErr);
+      throw accessTokErr;
+    }
+
+    if (refreshToken) {
+      const { error: refreshTokErr } = await supabase
+        .from(T_CHANNEL_TOKENS)
+        .upsert(
+          [
+            {
+              workspace_id: workspaceId,
+              provider,
+              external_id: externalId,
+              token_type: "refresh",
+              access_token: refreshToken,
+              expires_at: refreshExpiresAt,
+              updated_at: nowIso,
+            },
+          ],
+          { onConflict: "workspace_id,provider,external_id,token_type" }
+        );
+
+      if (refreshTokErr) {
+        console.error("TIKTOK REFRESH TOKEN UPSERT ERROR:", refreshTokErr);
+        throw refreshTokErr;
+      }
+    }
+
+    return res.json({
+      ok: true,
+      workspaceId,
+      provider,
+      platform: "tiktok",
+      channel: {
+        id: upsertedChannel?.id || null,
+        display_name: displayName,
+        external_id: externalId,
+        avatar_url: avatarUrl || "",
+      },
+      user: user || null,
+      expires_in: expiresIn || null,
+    });
+  } catch (e) {
+    console.error("TIKTOK EXCHANGE ERROR:", {
+      message: e?.message || "Unknown TikTok exchange error",
+      meta: e?.meta || null,
+      stack: e?.stack || null,
+    });
+    next(e);
+  }
+});
 
 
 /* ============================================================
