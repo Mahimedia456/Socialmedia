@@ -50,7 +50,9 @@ if (!TIKTOK_CLIENT_KEY || !TIKTOK_CLIENT_SECRET || !TIKTOK_REDIRECT_URI) {
     "TikTok env missing: TIKTOK_CLIENT_KEY / TIKTOK_CLIENT_SECRET / TIKTOK_REDIRECT_URI"
   );
 }
+
 const STORAGE_BUCKET = process.env.STORAGE_BUCKET || "publisher-media";
+
 if (!ACCESS_SECRET || !REFRESH_SECRET || !RESET_SECRET) {
   throw new Error(
     "Missing ACCESS_TOKEN_SECRET / REFRESH_TOKEN_SECRET / RESET_TOKEN_SECRET in backend/.env"
@@ -78,7 +80,7 @@ const T_WSM = "workspace_members";
 const T_SOCIAL_POSTS = "social_posts";
 const T_SOCIAL_POST_TARGETS = "social_post_targets";
 
-const T_ANALYTICS_CACHE = "analytics_cache"; // (optional / future)
+const T_ANALYTICS_CACHE = "analytics_cache"; // optional / future
 
 // Connections
 const T_CHANNELS = "workspace_channels";
@@ -122,6 +124,7 @@ function parseOAuthState(stateRaw) {
   if (!decoded) return null;
   return safeJsonParse(decoded, null);
 }
+
 /* ---------------- App ---------------- */
 const app = express();
 app.set("trust proxy", 1);
@@ -135,7 +138,7 @@ function isAllowedOrigin(origin) {
   if (origin.startsWith("http://127.0.0.1:")) return true;
 
   // allow Vercel deployments
-  if (/^https:\/\/.*\.vercel\.app$/.test(origin)) return true;
+  if (/^https:\/\/.*\.vercel\.app$/i.test(origin)) return true;
 
   // allow explicitly provided list
   if (EXTRA_ALLOWED_ORIGINS.includes(origin)) return true;
@@ -143,20 +146,18 @@ function isAllowedOrigin(origin) {
   return false;
 }
 
-app.use(
-  cors({
-    origin: (origin, cb) => {
-      if (isAllowedOrigin(origin)) return cb(null, true);
-      return cb(null, false);
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  })
-);
+const corsOptions = {
+  origin: (origin, cb) => {
+    if (isAllowedOrigin(origin)) return cb(null, true);
+    return cb(null, false);
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
 
-// ✅ Ensure preflight always returns headers
-app.options("*", cors());
+app.use(cors(corsOptions));
+app.options(/.*/, cors(corsOptions));
 
 app.use(helmet());
 
@@ -165,12 +166,14 @@ app.use("/api/meta/webhook", express.raw({ type: "application/json" }));
 app.use("/api/webhooks/meta", express.raw({ type: "application/json" }));
 
 app.use(express.json({ limit: "20mb" }));
+
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 50 * 1024 * 1024, // 50MB
   },
 });
+
 app.use(cookieParser());
 
 // request log
@@ -188,7 +191,12 @@ app.use((req, res, next) => {
 const inboxStore = new Map();
 
 /**
- * inboxStore: Map<workspaceId, { threads: Map<threadId, thread>, messages: Map<threadId, Map<msgKey, msg>> }>
+ * inboxStore:
+ * Map<workspaceId, {
+ *   threads: Map<threadId, thread>,
+ *   messages: Map<threadId, Map<msgKey, msg>>,
+ *   updatedAt: number
+ * }>
  */
 function getWsStore(workspaceId) {
   const ws = String(workspaceId || "");
@@ -307,31 +315,40 @@ function safeEmail(v) {
   const s = String(v || "").trim().toLowerCase();
   return s.includes("@") ? s : "";
 }
+
 function randomCode6() {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
+
 function signAccess(payload) {
   return jwt.sign(payload, ACCESS_SECRET, { expiresIn: "15m" });
 }
+
 function signRefresh(payload) {
   return jwt.sign(payload, REFRESH_SECRET, { expiresIn: "30d" });
 }
+
 function verifyRefresh(token) {
   return jwt.verify(token, REFRESH_SECRET);
 }
+
 function verifyAccess(token) {
   return jwt.verify(token, ACCESS_SECRET);
 }
+
 function signReset(payload) {
   return jwt.sign(payload, RESET_SECRET, { expiresIn: "10m" });
 }
+
 function verifyReset(token) {
   return jwt.verify(token, RESET_SECRET);
 }
+
 function isGlobalAdmin(role) {
   const r = String(role || "").toLowerCase();
   return r === "owner" || r === "admin";
 }
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -381,7 +398,6 @@ async function ensureStorageBucketExists() {
   );
 
   if (createErr) {
-    // ignore already exists style failures
     const msg = String(createErr?.message || "").toLowerCase();
     if (!msg.includes("already")) throw createErr;
   }
@@ -389,11 +405,7 @@ async function ensureStorageBucketExists() {
   return created || null;
 }
 
-async function uploadPublisherFileToStorage({
-  workspaceId,
-  userId,
-  file,
-}) {
+async function uploadPublisherFileToStorage({ workspaceId, userId, file }) {
   if (!file?.buffer) throw new Error("File buffer missing");
 
   await ensureStorageBucketExists();
@@ -406,8 +418,7 @@ async function uploadPublisherFileToStorage({
     throw new Error("Only image and video files are supported.");
   }
 
-  const objectPath =
-    `${workspaceId}/${userId}/${Date.now()}_${crypto.randomUUID()}${ext}`;
+  const objectPath = `${workspaceId}/${userId}/${Date.now()}_${crypto.randomUUID()}${ext}`;
 
   const { error: uploadErr } = await supabase.storage
     .from(STORAGE_BUCKET)
@@ -502,20 +513,24 @@ async function sendOtpEmail({ to, code }) {
   if (EMAIL_MODE === "dev" || EMAIL_MODE === "both") {
     console.log("RESET OTP (DEV LOG):", { email: to, code });
   }
+
   if (EMAIL_MODE === "smtp" || EMAIL_MODE === "both") {
     if (!mailer) {
       console.log("SMTP config missing. Email not sent.");
       return { mode: "log-only" };
     }
+
     await mailer.sendMail({
       from: SMTP_FROM,
       to,
       subject: "Your password reset code (Mahimedia Solutions)",
       html,
     });
+
     console.log("RESET OTP EMAIL SENT:", to);
     return { mode: "email-sent" };
   }
+
   return { mode: "log-only" };
 }
 
@@ -529,6 +544,7 @@ async function getUserByEmail(email) {
   if (error) throw error;
   return data || null;
 }
+
 async function getUserById(id) {
   const { data, error } = await supabase
     .from(T_USERS)
@@ -538,6 +554,7 @@ async function getUserById(id) {
   if (error) throw error;
   return data || null;
 }
+
 async function setRefreshToken(userId, token) {
   const { error } = await supabase
     .from(T_REFRESH)
@@ -546,6 +563,7 @@ async function setRefreshToken(userId, token) {
     });
   if (error) throw error;
 }
+
 async function getRefreshToken(userId) {
   const { data, error } = await supabase
     .from(T_REFRESH)
@@ -555,13 +573,12 @@ async function getRefreshToken(userId) {
   if (error) throw error;
   return data?.token || null;
 }
+
 async function clearRefreshToken(userId) {
-  const { error } = await supabase
-    .from(T_REFRESH)
-    .delete()
-    .eq("user_id", userId);
+  const { error } = await supabase.from(T_REFRESH).delete().eq("user_id", userId);
   if (error) throw error;
 }
+
 async function setOtp(userId, code, expiresAtMs) {
   const { error } = await supabase
     .from(T_OTP)
@@ -580,6 +597,7 @@ async function setOtp(userId, code, expiresAtMs) {
     );
   if (error) throw error;
 }
+
 async function getOtp(userId) {
   const { data, error } = await supabase
     .from(T_OTP)
@@ -594,6 +612,7 @@ async function getOtp(userId) {
     attemptsLeft: data.attempts_left,
   };
 }
+
 async function decrementOtpAttempts(userId) {
   const otp = await getOtp(userId);
   if (!otp) return;
@@ -604,10 +623,12 @@ async function decrementOtpAttempts(userId) {
     .eq("user_id", userId);
   if (error) throw error;
 }
+
 async function clearOtp(userId) {
   const { error } = await supabase.from(T_OTP).delete().eq("user_id", userId);
   if (error) throw error;
 }
+
 async function ensureDevUsers() {
   const pwd = process.env.DEV_PASSWORD || "mahimediasolutions";
   const hash = await bcrypt.hash(pwd, 10);
@@ -639,6 +660,7 @@ function getBearerToken(req) {
   if (!h.toLowerCase().startsWith("bearer ")) return "";
   return h.slice(7).trim();
 }
+
 function requireAuth(req, res, next) {
   try {
     const token = getBearerToken(req);
@@ -663,6 +685,7 @@ async function getWorkspaceMemberRole(userId, workspaceId) {
   if (!data || data.status !== "active") return null;
   return data.role || null;
 }
+
 async function requireWorkspaceAccess(req, res, next) {
   try {
     const { workspaceId } = req.params;
@@ -752,10 +775,7 @@ function mustEnv(v, name) {
 async function exchangeMetaCodeForToken({ code }) {
   const META_APP_ID = mustEnv(process.env.META_APP_ID, "META_APP_ID");
   const META_APP_SECRET = mustEnv(process.env.META_APP_SECRET, "META_APP_SECRET");
-  const META_REDIRECT_URI = mustEnv(
-    process.env.META_REDIRECT_URI,
-    "META_REDIRECT_URI"
-  );
+  const META_REDIRECT_URI = mustEnv(process.env.META_REDIRECT_URI, "META_REDIRECT_URI");
 
   const url = new URL(
     `https://graph.facebook.com/${META_GRAPH_VERSION}/oauth/access_token`
@@ -782,9 +802,7 @@ async function fetchMetaPages({ userAccessToken }) {
   let after = null;
 
   while (true) {
-    const url = new URL(
-      `https://graph.facebook.com/${META_GRAPH_VERSION}/me/accounts`
-    );
+    const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/me/accounts`);
     url.searchParams.set(
       "fields",
       [
@@ -870,8 +888,7 @@ async function fetchConversationMessages({
   const j = await r.json().catch(() => ({}));
 
   if (!r.ok) {
-    const msg =
-      j?.error?.message || "Failed to fetch conversation messages";
+    const msg = j?.error?.message || "Failed to fetch conversation messages";
     const e = new Error(msg);
     e.meta = j?.error || j;
     throw e;
@@ -957,6 +974,7 @@ async function fetchIgConversations({ igUserId, token, limit = 50, after = null 
     e.meta = j?.error || j;
     throw e;
   }
+
   return { data: j?.data || [], paging: j?.paging || null };
 }
 
@@ -978,6 +996,7 @@ async function fetchIgMessages({ conversationId, token, limit = 50, after = null
     e.meta = j?.error || j;
     throw e;
   }
+
   return { data: j?.data || [], paging: j?.paging || null };
 }
 
@@ -1021,9 +1040,7 @@ async function fetchAllIgMessages({ conversationId, token, maxMsgs = 500 }) {
 
 /* --------- SEND APIs --------- */
 async function sendFacebookPageMessage({ pageToken, recipientId, text }) {
-  const url = new URL(
-    `https://graph.facebook.com/${META_GRAPH_VERSION}/me/messages`
-  );
+  const url = new URL(`https://graph.facebook.com/${META_GRAPH_VERSION}/me/messages`);
   url.searchParams.set("access_token", pageToken);
 
   const body = {
@@ -1072,6 +1089,7 @@ async function sendInstagramMessage({ igUserId, token, recipientId, text }) {
   }
   return j;
 }
+
 async function fetchFacebookFeedAnalytics({ pageId, pageToken, limit = 50 }) {
   const url = new URL(
     `https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/posts`
@@ -1119,6 +1137,7 @@ async function fetchInstagramMediaAnalytics({ igUserId, token, limit = 50 }) {
 
   return metaGet(url.toString());
 }
+
 /* ================= META WEBHOOK HELPERS ================= */
 
 // Optional: verify X-Hub-Signature-256 if META_APP_SECRET is set.
@@ -1128,8 +1147,9 @@ function verifyMetaSignature({ rawBody, signatureHeader }) {
   if (!signatureHeader) return { ok: true, skipped: true };
 
   const sig = String(signatureHeader || "");
-  if (!sig.startsWith("sha256="))
+  if (!sig.startsWith("sha256=")) {
     return { ok: false, reason: "BAD_SIGNATURE_FORMAT" };
+  }
 
   const expected = crypto
     .createHmac("sha256", appSecret)
@@ -1140,8 +1160,9 @@ function verifyMetaSignature({ rawBody, signatureHeader }) {
 
   const a = Buffer.from(expected, "hex");
   const b = Buffer.from(got, "hex");
-  if (a.length !== b.length)
+  if (a.length !== b.length) {
     return { ok: false, reason: "SIGNATURE_LEN_MISMATCH" };
+  }
 
   const ok = crypto.timingSafeEqual(a, b);
   return ok ? { ok: true } : { ok: false, reason: "SIGNATURE_MISMATCH" };
@@ -1150,9 +1171,7 @@ function verifyMetaSignature({ rawBody, signatureHeader }) {
 async function findChannelByExternalId({ provider, platform, externalId }) {
   const { data, error } = await supabase
     .from(T_CHANNELS)
-    .select(
-      "id,workspace_id,platform,provider,external_id,display_name,status,meta"
-    )
+    .select("id,workspace_id,platform,provider,external_id,display_name,status,meta")
     .eq("provider", provider)
     .eq("platform", platform)
     .eq("external_id", externalId)
@@ -1262,9 +1281,7 @@ app.get("/api/health", (req, res) =>
 
 async function listUserWorkspaceIdsForAutoSync({ userId, role }) {
   if (isGlobalAdmin(role)) {
-    const { data, error } = await supabase
-      .from(T_WORKSPACES)
-      .select("id");
+    const { data, error } = await supabase.from(T_WORKSPACES).select("id");
     if (error) throw error;
     return (data || []).map((r) => String(r.id));
   }
@@ -1736,10 +1753,7 @@ async function fetchFacebookPageInsights({ pageId, pageToken, since, until }) {
   const url = new URL(
     `https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/insights`
   );
-  url.searchParams.set(
-    "metric",
-    "page_impressions,page_engaged_users,page_fans"
-  );
+  url.searchParams.set("metric", "page_impressions,page_engaged_users,page_fans");
   url.searchParams.set("since", since);
   url.searchParams.set("until", until);
   url.searchParams.set("access_token", pageToken);
@@ -1994,10 +2008,11 @@ app.get(
 
       const pageId = String(ch.external_id);
       const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
-      if (!pageToken)
+      if (!pageToken) {
         return res
           .status(400)
           .json({ error: "MISSING_TOKEN", message: "Missing page token" });
+      }
 
       const url = new URL(
         `https://graph.facebook.com/${META_GRAPH_VERSION}/${pageId}/feed`
@@ -2199,10 +2214,11 @@ app.get(
 
       const pageId = String(ch.external_id);
       const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
-      if (!pageToken)
+      if (!pageToken) {
         return res
           .status(400)
           .json({ error: "MISSING_TOKEN", message: "Missing page token" });
+      }
 
       const url = new URL(
         `https://graph.facebook.com/${META_GRAPH_VERSION}/${post_id}/comments`
@@ -2244,18 +2260,21 @@ app.post(
       const comment_id = String(req.body?.comment_id || "");
       const message = String(req.body?.message || "").trim();
 
-      if (!page_channel_id)
+      if (!page_channel_id) {
         return res
           .status(400)
           .json({ error: "VALIDATION_ERROR", message: "page_channel_id is required" });
-      if (!comment_id)
+      }
+      if (!comment_id) {
         return res
           .status(400)
           .json({ error: "VALIDATION_ERROR", message: "comment_id is required" });
-      if (!message)
+      }
+      if (!message) {
         return res
           .status(400)
           .json({ error: "VALIDATION_ERROR", message: "message is required" });
+      }
 
       const ch = await getChannelById({ workspaceId, channelId: page_channel_id });
       if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
@@ -2273,10 +2292,11 @@ app.post(
 
       const pageId = String(ch.external_id);
       const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
-      if (!pageToken)
+      if (!pageToken) {
         return res
           .status(400)
           .json({ error: "MISSING_TOKEN", message: "Missing page token" });
+      }
 
       const url = `https://graph.facebook.com/${META_GRAPH_VERSION}/${comment_id}/comments`;
       const j = await metaPostForm(url, { access_token: pageToken, message });
@@ -2301,14 +2321,16 @@ app.post(
       const page_channel_id = String(req.body?.page_channel_id || "");
       const post_id = String(req.body?.post_id || "");
 
-      if (!page_channel_id)
+      if (!page_channel_id) {
         return res
           .status(400)
           .json({ error: "VALIDATION_ERROR", message: "page_channel_id is required" });
-      if (!post_id)
+      }
+      if (!post_id) {
         return res
           .status(400)
           .json({ error: "VALIDATION_ERROR", message: "post_id is required" });
+      }
 
       const ch = await getChannelById({ workspaceId, channelId: page_channel_id });
       if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
@@ -2326,10 +2348,11 @@ app.post(
 
       const pageId = String(ch.external_id);
       const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
-      if (!pageToken)
+      if (!pageToken) {
         return res
           .status(400)
           .json({ error: "MISSING_TOKEN", message: "Missing page token" });
+      }
 
       const url = `https://graph.facebook.com/${META_GRAPH_VERSION}/${post_id}/likes`;
       const j = await metaPostForm(url, { access_token: pageToken });
@@ -2354,18 +2377,21 @@ app.post(
       const post_id = String(req.body?.post_id || "");
       const message = String(req.body?.message || "").trim();
 
-      if (!page_channel_id)
+      if (!page_channel_id) {
         return res
           .status(400)
           .json({ error: "VALIDATION_ERROR", message: "page_channel_id is required" });
-      if (!post_id)
+      }
+      if (!post_id) {
         return res
           .status(400)
           .json({ error: "VALIDATION_ERROR", message: "post_id is required" });
-      if (!message)
+      }
+      if (!message) {
         return res
           .status(400)
           .json({ error: "VALIDATION_ERROR", message: "message is required" });
+      }
 
       const ch = await getChannelById({ workspaceId, channelId: page_channel_id });
       if (!ch) return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
@@ -2383,10 +2409,11 @@ app.post(
 
       const pageId = String(ch.external_id);
       const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
-      if (!pageToken)
+      if (!pageToken) {
         return res
           .status(400)
           .json({ error: "MISSING_TOKEN", message: "Missing page token" });
+      }
 
       const url = `https://graph.facebook.com/${META_GRAPH_VERSION}/${post_id}/comments`;
       const j = await metaPostForm(url, { access_token: pageToken, message });
@@ -2416,6 +2443,7 @@ function handleMetaWebhookGet(req, res) {
       console.log("META WEBHOOK VERIFIED");
       return res.status(200).send(challenge);
     }
+
     return res.status(403).json({ error: "WEBHOOK_VERIFY_FAILED" });
   } catch (e) {
     return res.status(500).json({
@@ -2465,8 +2493,9 @@ async function handleMetaWebhookPost(req, res) {
         if (field.includes("message") || field.includes("messaging")) {
           if (Array.isArray(value?.messaging)) out.push(...value.messaging);
           if (Array.isArray(value?.messages)) out.push(...value.messages);
-          if (Array.isArray(value?.entry?.[0]?.messaging))
+          if (Array.isArray(value?.entry?.[0]?.messaging)) {
             out.push(...value.entry[0].messaging);
+          }
         }
       }
       return out;
@@ -2626,8 +2655,9 @@ app.post("/api/auth/refresh-token", async (req, res) => {
     if (!user) return res.status(401).json({ error: "INVALID_REFRESH_TOKEN" });
 
     const saved = await getRefreshToken(user.id);
-    if (saved !== token)
+    if (saved !== token) {
       return res.status(401).json({ error: "REFRESH_REVOKED" });
+    }
 
     const access_token = signAccess({
       sub: user.id,
@@ -2647,7 +2677,9 @@ app.post("/api/auth/logout", async (req, res, next) => {
       try {
         const decoded = verifyRefresh(token);
         await clearRefreshToken(decoded.sub);
-      } catch {}
+      } catch {
+        // ignore
+      }
     }
     return res.json({ ok: true });
   } catch (e) {
@@ -2658,10 +2690,11 @@ app.post("/api/auth/logout", async (req, res, next) => {
 app.post("/api/auth/forgot-password", async (req, res, next) => {
   try {
     const email = safeEmail(req.body?.email);
-    if (!email)
+    if (!email) {
       return res
         .status(400)
         .json({ error: "VALIDATION_ERROR", message: "Email required." });
+    }
 
     const user = await getUserByEmail(email);
     if (!user) return res.json({ ok: true });
@@ -2737,6 +2770,7 @@ app.post("/api/auth/reset-password", async (req, res, next) => {
     } catch {
       return res.status(401).json({ error: "INVALID_RESET_TOKEN" });
     }
+
     if (decoded.purpose !== "password_reset") {
       return res.status(401).json({ error: "INVALID_RESET_TOKEN" });
     }
@@ -2769,6 +2803,7 @@ app.get("/api/workspaces", requireAuth, async (req, res, next) => {
         .select("id,name,description,plan,created_at,created_by")
         .order("created_at", { ascending: false });
       if (error) throw error;
+
       return res.json({
         workspaces: (data || []).map((w) => ({ ...w, my_role: req.auth.role })),
       });
@@ -2782,6 +2817,7 @@ app.get("/api/workspaces", requireAuth, async (req, res, next) => {
       .eq("user_id", req.auth.userId)
       .eq("status", "active")
       .order("joined_at", { ascending: false });
+
     if (error) throw error;
 
     const rows = (data || []).map((r) => ({
@@ -2793,6 +2829,7 @@ app.get("/api/workspaces", requireAuth, async (req, res, next) => {
       created_by: r.workspaces?.created_by,
       my_role: r.role,
     }));
+
     res.json({ workspaces: rows });
   } catch (e) {
     next(e);
@@ -3033,8 +3070,6 @@ app.post("/api/meta/connect-pages", requireAuth, async (req, res, next) => {
   }
 });
 
-/* ---------------- TikTok OAuth Exchange ---------------- */
-
 /* ============================================================
    TIKTOK CONNECT APIs
 ============================================================ */
@@ -3072,7 +3107,10 @@ async function tiktokTokenExchange({ code }) {
 
 async function tiktokGetUserInfo({ accessToken }) {
   const url = new URL("https://open.tiktokapis.com/v2/user/info/");
-  url.searchParams.set("fields", "open_id,display_name,avatar_url,profile_deep_link,bio_description");
+  url.searchParams.set(
+    "fields",
+    "open_id,display_name,avatar_url,profile_deep_link,bio_description"
+  );
 
   const r = await fetch(url.toString(), {
     method: "GET",
@@ -3084,10 +3122,7 @@ async function tiktokGetUserInfo({ accessToken }) {
   const j = await r.json().catch(() => ({}));
 
   if (!r.ok) {
-    const msg =
-      j?.error?.message ||
-      j?.message ||
-      "TikTok user info fetch failed";
+    const msg = j?.error?.message || j?.message || "TikTok user info fetch failed";
     const e = new Error(msg);
     e.meta = j;
     throw e;
@@ -3143,8 +3178,7 @@ app.post("/api/tiktok/exchange", requireAuth, async (req, res, next) => {
     const refreshToken = String(tokenData?.refresh_token || "");
     const expiresIn = Number(tokenData?.expires_in || 0);
     const refreshExpiresIn = Number(tokenData?.refresh_expires_in || 0);
-    const openId =
-      String(tokenData?.open_id || tokenData?.openid || "").trim();
+    const openId = String(tokenData?.open_id || tokenData?.openid || "").trim();
 
     if (!accessToken) {
       return res.status(400).json({
@@ -3156,8 +3190,7 @@ app.post("/api/tiktok/exchange", requireAuth, async (req, res, next) => {
 
     const user = await tiktokGetUserInfo({ accessToken });
 
-    const externalId =
-      String(user?.open_id || openId || "").trim();
+    const externalId = String(user?.open_id || openId || "").trim();
 
     if (!externalId) {
       return res.status(400).json({
@@ -3181,7 +3214,6 @@ app.post("/api/tiktok/exchange", requireAuth, async (req, res, next) => {
       ? new Date(Date.now() + refreshExpiresIn * 1000).toISOString()
       : null;
 
-    // ✅ save channel in SAME table structure your app already uses
     const { data: upsertedChannel, error: chErr } = await supabase
       .from(T_CHANNELS)
       .upsert(
@@ -3211,7 +3243,6 @@ app.post("/api/tiktok/exchange", requireAuth, async (req, res, next) => {
 
     if (chErr) throw chErr;
 
-    // ✅ save access token
     const { error: accessTokErr } = await supabase
       .from(T_CHANNEL_TOKENS)
       .upsert(
@@ -3231,7 +3262,6 @@ app.post("/api/tiktok/exchange", requireAuth, async (req, res, next) => {
 
     if (accessTokErr) throw accessTokErr;
 
-    // ✅ save refresh token
     if (refreshToken) {
       const { error: refreshTokErr } = await supabase
         .from(T_CHANNEL_TOKENS)
@@ -3436,6 +3466,7 @@ app.get(
     }
   }
 );
+
 app.post("/api/uploads", requireAuth, upload.single("file"), async (req, res, next) => {
   try {
     const workspaceId = String(req.body?.workspaceId || "").trim();
@@ -3474,6 +3505,7 @@ app.post("/api/uploads", requireAuth, upload.single("file"), async (req, res, ne
     next(e);
   }
 });
+
 /* ============================================================
    PUBLISHER APIs
 ============================================================ */
@@ -3484,19 +3516,18 @@ app.get(
   async (req, res, next) => {
     try {
       const { workspaceId } = req.params;
-      // const provider = String(req.query.provider || "meta");
-const provider = String(req.query.provider || "").trim();
+      const provider = String(req.query.provider || "").trim();
+
       let q = supabase
-  .from(T_CHANNELS)
-  .select("id,provider,platform,display_name,external_id,status,meta,updated_at")
-  .eq("workspace_id", workspaceId)
-  .eq("status", CHANNEL_STATUS_CONNECTED)
-  .order("updated_at", { ascending: false });
+        .from(T_CHANNELS)
+        .select("id,provider,platform,display_name,external_id,status,meta,updated_at")
+        .eq("workspace_id", workspaceId)
+        .eq("status", CHANNEL_STATUS_CONNECTED)
+        .order("updated_at", { ascending: false });
 
-if (provider) q = q.eq("provider", provider);
+      if (provider) q = q.eq("provider", provider);
 
-const { data, error } = await q;
-
+      const { data, error } = await q;
       if (error) throw error;
 
       const channels = (data || []).map((c) => ({
@@ -3506,10 +3537,15 @@ const { data, error } = await q;
             ? { text: true, link: true, image: true, video: true }
             : c.platform === "instagram"
             ? { text: false, link: false, image: true, video: true, reel: true }
-            : { text: false, link: false, image: false, video: false },
             : c.platform === "tiktok"
-      ? { text: false, link: false, image: false, video: true, short_video: true }
-      : { text: false, link: false, image: false, video: false },
+            ? {
+                text: false,
+                link: false,
+                image: false,
+                video: true,
+                short_video: true,
+              }
+            : { text: false, link: false, image: false, video: false },
       }));
 
       res.json({ channels });
@@ -3531,7 +3567,9 @@ app.post(
       const text = String(req.body?.text || "");
       const link_url = String(req.body?.link_url || "");
       const media_urls = Array.isArray(req.body?.media_urls) ? req.body.media_urls : [];
-      const selected_channel_ids = Array.isArray(req.body?.channel_ids) ? req.body.channel_ids : [];
+      const selected_channel_ids = Array.isArray(req.body?.channel_ids)
+        ? req.body.channel_ids
+        : [];
 
       const action = String(req.body?.action || "draft"); // draft | scheduled | publish_now
       const scheduled_at = req.body?.scheduled_at
@@ -3718,7 +3756,9 @@ async function publishPostNow({ workspaceId, postId }) {
         token_type: "page",
       });
 
-      if (!token) throw new Error(`Missing token for ${t.platform}:${t.external_id}`);
+      if (!token && t.provider === "meta") {
+        throw new Error(`Missing token for ${t.platform}:${t.external_id}`);
+      }
 
       if (t.provider === "meta" && t.platform === "facebook") {
         const message = String(post.text || "");
@@ -3794,6 +3834,8 @@ async function publishPostNow({ workspaceId, postId }) {
             })
             .eq("id", t.id)
         );
+      } else if (t.provider === "tiktok" && t.platform === "tiktok") {
+        throw new Error("TikTok publishing not implemented yet");
       } else {
         throw new Error(`Unsupported target: ${t.provider}:${t.platform}`);
       }
@@ -3905,7 +3947,9 @@ app.get("/api/workspaces/:workspaceId/inbox/stream", async (req, res) => {
     const keepAlive = setInterval(() => {
       try {
         sseWrite(res, "ping", { ts: Date.now() });
-      } catch {}
+      } catch {
+        // ignore
+      }
     }, 25000);
 
     req.on("close", () => {
@@ -3935,9 +3979,15 @@ app.get(
 
       let rows = listThreadsFromMemory(workspaceId);
 
-      if (platform !== "all") rows = rows.filter((t) => String(t.platform) === platform);
-      if (status !== "all") rows = rows.filter((t) => String(t.status) === status);
-      if (channelId !== "all") rows = rows.filter((t) => String(t.channel_id) === channelId);
+      if (platform !== "all") {
+        rows = rows.filter((t) => String(t.platform) === platform);
+      }
+      if (status !== "all") {
+        rows = rows.filter((t) => String(t.status) === status);
+      }
+      if (channelId !== "all") {
+        rows = rows.filter((t) => String(t.channel_id) === channelId);
+      }
 
       if (q) {
         rows = rows.filter((t) => {
@@ -3970,8 +4020,9 @@ app.get(
     const limit = Math.min(500, Math.max(1, Number(req.query.limit || 100)));
 
     const ws = getWsStore(workspaceId);
-    if (!ws || !ws.threads.has(threadId))
+    if (!ws || !ws.threads.has(threadId)) {
       return res.status(404).json({ error: "THREAD_NOT_FOUND" });
+    }
 
     const rows = listMessagesFromMemory(workspaceId, threadId)
       .slice()
@@ -4018,7 +4069,9 @@ app.post("/api/inbox/threads/:threadId/messages", requireAuth, async (req, res, 
   try {
     const { threadId } = req.params;
     const text = normalizeText(req.body?.text);
-    if (!text) return res.status(400).json({ error: "VALIDATION_ERROR", message: "text required" });
+    if (!text) {
+      return res.status(400).json({ error: "VALIDATION_ERROR", message: "text required" });
+    }
 
     let workspaceId = "";
     let thread = null;
@@ -4032,7 +4085,9 @@ app.post("/api/inbox/threads/:threadId/messages", requireAuth, async (req, res, 
       }
     }
 
-    if (!thread || !workspaceId) return res.status(404).json({ error: "THREAD_NOT_FOUND" });
+    if (!thread || !workspaceId) {
+      return res.status(404).json({ error: "THREAD_NOT_FOUND" });
+    }
 
     if (!isGlobalAdmin(req.auth.role)) {
       const role = await getWorkspaceMemberRole(req.auth.userId, workspaceId);
@@ -4052,7 +4107,9 @@ app.post("/api/inbox/threads/:threadId/messages", requireAuth, async (req, res, 
         const pageToken = await getPageTokenFromDB({ workspaceId, pageId });
 
         if (!pageToken) throw new Error("Missing page token for sending");
-        if (!recipientId) throw new Error("Missing recipient PSID (participant_external_id)");
+        if (!recipientId) {
+          throw new Error("Missing recipient PSID (participant_external_id)");
+        }
 
         sendResult = await sendFacebookPageMessage({ pageToken, recipientId, text });
       }
@@ -4066,7 +4123,9 @@ app.post("/api/inbox/threads/:threadId/messages", requireAuth, async (req, res, 
         });
 
         if (!igToken) throw new Error("Missing IG token for sending");
-        if (!recipientId) throw new Error("Missing IG recipient id (participant_external_id)");
+        if (!recipientId) {
+          throw new Error("Missing IG recipient id (participant_external_id)");
+        }
 
         sendResult = await sendInstagramMessage({
           igUserId,
@@ -4081,7 +4140,8 @@ app.post("/api/inbox/threads/:threadId/messages", requireAuth, async (req, res, 
     }
 
     const sentAt = new Date().toISOString();
-    const external_message_id = sendResult?.message_id || sendResult?.id || `local_${Date.now()}`;
+    const external_message_id =
+      sendResult?.message_id || sendResult?.id || `local_${Date.now()}`;
 
     const msg = upsertMessageInMemory(workspaceId, threadId, {
       id: `mem_${Date.now()}_${Math.random().toString(16).slice(2)}`,

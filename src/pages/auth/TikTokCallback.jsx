@@ -75,8 +75,8 @@ export default function TikTokCallback() {
           "tiktok_exchange_result",
           JSON.stringify({
             ok: false,
-            error: "You are not logged in. Please login again and reconnect TikTok.",
             workspaceId,
+            error: "You are not logged in. Please login again and reconnect TikTok.",
           })
         );
         clearTikTokOAuthState();
@@ -109,14 +109,10 @@ export default function TikTokCallback() {
             JSON.stringify({
               ok: false,
               workspaceId,
-              error:
-                data?.message ||
-                data?.error ||
-                "TikTok exchange failed",
+              error: data?.message || data?.error || "TikTok exchange failed",
               raw: data,
             })
           );
-
           clearTikTokOAuthState();
           navigate("/connections", { replace: true });
           return;
