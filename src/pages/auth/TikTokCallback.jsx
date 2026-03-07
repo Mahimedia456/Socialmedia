@@ -1,4 +1,5 @@
 // src/pages/auth/TikTokCallback.jsx
+
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import {
@@ -85,21 +86,21 @@ export default function TikTokCallback() {
       }
 
       try {
-        const res = await fetch(
-          `${import.meta.env.VITE_API_BASE}/api/tiktok/exchange`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${accessToken}`,
-            },
-            body: JSON.stringify({
-              code,
-              state,
-              workspaceId,
-            }),
-          }
-        );
+        const API_BASE =
+          import.meta.env.VITE_API_BASE || import.meta.env.VITE_API_URL || "";
+
+        const res = await fetch(`${API_BASE}/api/tiktok/exchange`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify({
+            code,
+            state,
+            workspaceId,
+          }),
+        });
 
         const data = await res.json().catch(() => ({}));
 
