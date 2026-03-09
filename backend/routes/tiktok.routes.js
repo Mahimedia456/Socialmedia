@@ -1,3 +1,4 @@
+// backend/routes/tiktok.routes.js
 import express from "express";
 import {
   providerTikTok,
@@ -221,120 +222,119 @@ export default function createTikTokRouter({
     }
   });
 
-  router.get(
-    "/workspaces/:workspaceId/feeds",
-    requireAuth,
-    async (req, res, next) => {
-      try {
-        const { workspaceId } = req.params;
-        const channelId = String(req.query.channel_id || "").trim();
-        const cursor = Number(req.query.cursor || 0);
-        const maxCount = Math.min(20, Math.max(1, Number(req.query.limit || 10)));
+  router.get("/workspaces/:workspaceId/feeds", requireAuth, async (req, res, next) => {
+    try {
+      const { workspaceId } = req.params;
+      const channelId = String(req.query.channel_id || "").trim();
+      const cursor = Number(req.query.cursor || 0);
+      const maxCount = Math.min(20, Math.max(1, Number(req.query.limit || 10)));
 
-        if (!channelId) {
-          return res.status(400).json({
-            error: "VALIDATION_ERROR",
-            message: "channel_id is required",
-          });
-        }
-
-        if (!isGlobalAdmin(req.auth.role)) {
-          const role = await getWorkspaceMemberRole(req.auth.userId, workspaceId);
-          if (!role) {
-            return res.status(403).json({ error: "WORKSPACE_FORBIDDEN" });
-          }
-        }
-
-        const channel = await getWorkspaceChannel({ workspaceId, channelId });
-        if (!channel) {
-          return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
-        }
-
-        if (
-          String(channel.provider) !== "tiktok" ||
-          String(channel.platform) !== "tiktok"
-        ) {
-          return res.status(400).json({
-            error: "INVALID_CHANNEL",
-            message: "Not a TikTok channel",
-          });
-        }
-
-        if (String(channel.status || "").toLowerCase() !== String(channelStatusConnected)) {
-          return res.status(400).json({
-            error: "CHANNEL_NOT_CONNECTED",
-            message: "TikTok channel is not connected",
-          });
-        }
-
-        const tokenRow = await getChannelToken({
-          workspaceId,
-          externalId: String(channel.external_id),
-          tokenType: "access",
+      if (!channelId) {
+        return res.status(400).json({
+          error: "VALIDATION_ERROR",
+          message: "channel_id is required",
         });
-
-        const accessToken = String(tokenRow?.access_token || "").trim();
-        if (!accessToken) {
-          return res.status(400).json({
-            error: "MISSING_TOKEN",
-            message: "Missing TikTok access token",
-          });
-        }
-
-        const feed = await tiktokListVideos({
-          accessToken,
-          cursor,
-          maxCount,
-        });
-
-        const videos = (feed.videos || []).map((v) => ({
-          id: v.id || "",
-          title: v.title || "",
-          caption: v.video_description || v.title || "",
-          create_time: v.create_time || null,
-          duration: Number(v.duration || 0),
-          width: Number(v.width || 0),
-          height: Number(v.height || 0),
-          cover_image_url: v.cover_image_url || "",
-          share_url: v.share_url || "",
-          embed_html: v.embed_html || "",
-          embed_link: v.embed_link || "",
-          metrics: {
-            likes: Number(v.like_count || 0),
-            comments: Number(v.comment_count || 0),
-            shares: Number(v.share_count || 0),
-            views: Number(v.view_count || 0),
-          },
-          raw: v,
-        }));
-
-        return res.json({
-          ok: true,
-          channel: {
-            id: channel.id,
-            display_name: channel.display_name,
-            external_id: channel.external_id,
-            avatar_url: channel?.meta?.avatar_url || "",
-          },
-          data: videos,
-          paging: {
-            cursor: feed.cursor,
-            has_more: !!feed.has_more,
-            next_cursor: feed.has_more ? feed.cursor : null,
-          },
-        });
-      } catch (e) {
-        console.error("TIKTOK FEED ERROR:", {
-          message: e?.message || "Unknown TikTok feed error",
-          meta: e?.meta || null,
-          details: e?.details || null,
-          hint: e?.hint || null,
-          code: e?.code || null,
-        });
-        next(e);
       }
+
+      if (!isGlobalAdmin(req.auth.role)) {
+        const role = await getWorkspaceMemberRole(req.auth.userId, workspaceId);
+        if (!role) {
+          return res.status(403).json({ error: "WORKSPACE_FORBIDDEN" });
+        }
+      }
+
+      const channel = await getWorkspaceChannel({ workspaceId, channelId });
+      if (!channel) {
+        return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
+      }
+
+      if (
+        String(channel.provider) !== "tiktok" ||
+        String(channel.platform) !== "tiktok"
+      ) {
+        return res.status(400).json({
+          error: "INVALID_CHANNEL",
+          message: "Not a TikTok channel",
+        });
+      }
+
+      if (
+        String(channel.status || "").toLowerCase() !==
+        String(channelStatusConnected).toLowerCase()
+      ) {
+        return res.status(400).json({
+          error: "CHANNEL_NOT_CONNECTED",
+          message: "TikTok channel is not connected",
+        });
+      }
+
+      const tokenRow = await getChannelToken({
+        workspaceId,
+        externalId: String(channel.external_id),
+        tokenType: "access",
+      });
+
+      const accessToken = String(tokenRow?.access_token || "").trim();
+      if (!accessToken) {
+        return res.status(400).json({
+          error: "MISSING_TOKEN",
+          message: "Missing TikTok access token",
+        });
+      }
+
+      const feed = await tiktokListVideos({
+        accessToken,
+        cursor,
+        maxCount,
+      });
+
+      const videos = (feed.videos || []).map((v) => ({
+        id: v.id || "",
+        title: v.title || "",
+        caption: v.video_description || v.title || "",
+        create_time: v.create_time || null,
+        duration: Number(v.duration || 0),
+        width: Number(v.width || 0),
+        height: Number(v.height || 0),
+        cover_image_url: v.cover_image_url || "",
+        share_url: v.share_url || "",
+        embed_html: v.embed_html || "",
+        embed_link: v.embed_link || "",
+        metrics: {
+          likes: Number(v.like_count || 0),
+          comments: Number(v.comment_count || 0),
+          shares: Number(v.share_count || 0),
+          views: Number(v.view_count || 0),
+        },
+        raw: v,
+      }));
+
+      return res.json({
+        ok: true,
+        channel: {
+          id: channel.id,
+          display_name: channel.display_name,
+          external_id: channel.external_id,
+          avatar_url: channel?.meta?.avatar_url || "",
+        },
+        data: videos,
+        paging: {
+          cursor: feed.cursor,
+          has_more: !!feed.has_more,
+          next_cursor: feed.has_more ? feed.cursor : null,
+        },
+      });
+    } catch (e) {
+      console.error("TIKTOK FEED ERROR:", {
+        message: e?.message || "Unknown TikTok feed error",
+        meta: e?.meta || null,
+        details: e?.details || null,
+        hint: e?.hint || null,
+        code: e?.code || null,
+      });
+      next(e);
     }
-  );
+  });
 
   return router;
 }

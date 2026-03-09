@@ -1,3 +1,5 @@
+// backend/services/tiktok.service.js
+
 export function providerTikTok() {
   return "tiktok";
 }
@@ -209,8 +211,7 @@ export async function tiktokListVideos({
     throw e;
   }
 
-  // TikTok v2 APIs often return 200 with embedded error object too
-  if (j?.error?.code && j?.error?.code !== "ok") {
+  if (j?.error?.code && String(j.error.code).toLowerCase() !== "ok") {
     const e = new Error(
       j?.error?.message || j?.error?.code || "TikTok video list failed"
     );

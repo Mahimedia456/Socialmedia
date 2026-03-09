@@ -113,7 +113,8 @@ export function getStoredTikTokWorkspaceId() {
 }
 
 export function clearTikTokOAuthState() {
-  localStorage.removeItem("tiktok_oauth_state");
-  localStorage.removeItem("tiktok_oauth_nonce");
-  localStorage.removeItem("tiktok_oauth_workspace_id");
+localStorage.removeItem("tiktok_oauth_state");
+localStorage.removeItem("tiktok_oauth_nonce");
+localStorage.removeItem("tiktok_oauth_workspace_id");
+localStorage.removeItem("tiktok_exchange_result");
 }
