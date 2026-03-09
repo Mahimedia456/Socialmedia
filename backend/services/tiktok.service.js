@@ -1,5 +1,3 @@
-// backend/services/tiktok.service.js
-
 export function providerTikTok() {
   return "tiktok";
 }
@@ -92,10 +90,7 @@ export async function tiktokTokenExchange({ code }) {
 
 export async function tiktokGetUserInfo({ accessToken }) {
   const url = new URL("https://open.tiktokapis.com/v2/user/info/");
-  url.searchParams.set(
-    "fields",
-    "open_id,union_id,avatar_url,display_name"
-  );
+  url.searchParams.set("fields", "open_id,union_id,avatar_url,display_name");
 
   const r = await fetch(url.toString(), {
     method: "GET",
@@ -162,8 +157,8 @@ export async function tiktokListVideos({
       "width",
       "cover_image_url",
       "share_url",
-      "embed_html",
       "embed_link",
+      "embed_html",
       "like_count",
       "comment_count",
       "share_count",

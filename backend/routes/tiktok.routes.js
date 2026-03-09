@@ -1,4 +1,3 @@
-// backend/routes/tiktok.routes.js
 import express from "express";
 import {
   providerTikTok,
@@ -101,9 +100,7 @@ export default function createTikTokRouter({
           meta: userErr?.meta || null,
         });
 
-        if (!openIdFromToken) {
-          throw userErr;
-        }
+        if (!openIdFromToken) throw userErr;
       }
 
       const externalId = String(user?.open_id || openIdFromToken || "").trim();
@@ -116,7 +113,6 @@ export default function createTikTokRouter({
       }
 
       const displayName = String(user?.display_name || "TikTok Account").trim();
-
       const provider = providerTikTok();
       const nowIso = new Date().toISOString();
 
@@ -210,14 +206,6 @@ export default function createTikTokRouter({
         expires_in: expiresIn || null,
       });
     } catch (e) {
-      console.error("TIKTOK EXCHANGE ERROR:", {
-        message: e?.message || "Unknown TikTok exchange error",
-        meta: e?.meta || null,
-        details: e?.details || null,
-        hint: e?.hint || null,
-        code: e?.code || null,
-        stack: e?.stack || null,
-      });
       next(e);
     }
   });
@@ -248,23 +236,10 @@ export default function createTikTokRouter({
         return res.status(404).json({ error: "CHANNEL_NOT_FOUND" });
       }
 
-      if (
-        String(channel.provider) !== "tiktok" ||
-        String(channel.platform) !== "tiktok"
-      ) {
+      if (String(channel.provider) !== "tiktok" || String(channel.platform) !== "tiktok") {
         return res.status(400).json({
           error: "INVALID_CHANNEL",
           message: "Not a TikTok channel",
-        });
-      }
-
-      if (
-        String(channel.status || "").toLowerCase() !==
-        String(channelStatusConnected).toLowerCase()
-      ) {
-        return res.status(400).json({
-          error: "CHANNEL_NOT_CONNECTED",
-          message: "TikTok channel is not connected",
         });
       }
 
@@ -282,56 +257,69 @@ export default function createTikTokRouter({
         });
       }
 
-      const feed = await tiktokListVideos({
-        accessToken,
-        cursor,
-        maxCount,
-      });
+      try {
+        const feed = await tiktokListVideos({
+          accessToken,
+          cursor,
+          maxCount,
+        });
 
-      const videos = (feed.videos || []).map((v) => ({
-        id: v.id || "",
-        title: v.title || "",
-        caption: v.video_description || v.title || "",
-        create_time: v.create_time || null,
-        duration: Number(v.duration || 0),
-        width: Number(v.width || 0),
-        height: Number(v.height || 0),
-        cover_image_url: v.cover_image_url || "",
-        share_url: v.share_url || "",
-        embed_html: v.embed_html || "",
-        embed_link: v.embed_link || "",
-        metrics: {
-          likes: Number(v.like_count || 0),
-          comments: Number(v.comment_count || 0),
-          shares: Number(v.share_count || 0),
-          views: Number(v.view_count || 0),
-        },
-        raw: v,
-      }));
+        const videos = (feed.videos || []).map((v) => ({
+          id: v.id || "",
+          title: v.title || "",
+          caption: v.video_description || v.title || "",
+          create_time: v.create_time || null,
+          duration: Number(v.duration || 0),
+          width: Number(v.width || 0),
+          height: Number(v.height || 0),
+          cover_image_url: v.cover_image_url || "",
+          share_url: v.share_url || "",
+          embed_html: v.embed_html || "",
+          embed_link: v.embed_link || "",
+          metrics: {
+            likes: Number(v.like_count || 0),
+            comments: Number(v.comment_count || 0),
+            shares: Number(v.share_count || 0),
+            views: Number(v.view_count || 0),
+          },
+          raw: v,
+        }));
 
-      return res.json({
-        ok: true,
-        channel: {
-          id: channel.id,
-          display_name: channel.display_name,
-          external_id: channel.external_id,
-          avatar_url: channel?.meta?.avatar_url || "",
-        },
-        data: videos,
-        paging: {
-          cursor: feed.cursor,
-          has_more: !!feed.has_more,
-          next_cursor: feed.has_more ? feed.cursor : null,
-        },
-      });
+        return res.json({
+          ok: true,
+          channel: {
+            id: channel.id,
+            display_name: channel.display_name,
+            external_id: channel.external_id,
+            avatar_url: channel?.meta?.avatar_url || "",
+          },
+          data: videos,
+          paging: {
+            cursor: feed.cursor,
+            has_more: !!feed.has_more,
+            next_cursor: feed.has_more ? feed.cursor : null,
+          },
+        });
+      } catch (e) {
+        const msg = String(e?.message || "");
+        const scopeText = String(channel?.meta?.scope || "");
+
+        if (
+          msg.toLowerCase().includes("scope") ||
+          msg.toLowerCase().includes("authorize")
+        ) {
+          return res.status(403).json({
+            error: "TIKTOK_SCOPE_MISSING",
+            message:
+              "TikTok token does not include required video.list scope. Reconnect TikTok with video.list.",
+            granted_scope: scopeText || null,
+            meta: e?.meta || null,
+          });
+        }
+
+        throw e;
+      }
     } catch (e) {
-      console.error("TIKTOK FEED ERROR:", {
-        message: e?.message || "Unknown TikTok feed error",
-        meta: e?.meta || null,
-        details: e?.details || null,
-        hint: e?.hint || null,
-        code: e?.code || null,
-      });
       next(e);
     }
   });

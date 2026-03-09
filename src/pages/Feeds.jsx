@@ -46,7 +46,10 @@ function clampText(s = "", n = 180) {
 }
 
 /* ---------------------------
-   Media modal (image/video)
+   Media modal
+   - FB/IG video => <video>
+   - Image => <img>
+   - TikTok => cover + open link
 ---------------------------- */
 function MediaModal({ open, onClose, media }) {
   const escClose = (e) => {
@@ -60,7 +63,9 @@ function MediaModal({ open, onClose, media }) {
     // eslint-disable-next-line
   }, [open]);
 
-  if (!open || !media?.url) return null;
+  if (!open || !(media?.url || media?.thumb)) return null;
+
+  const isTikTok = media.type === "tiktok";
   const isVideo = media.type === "video";
 
   return (
@@ -92,7 +97,32 @@ function MediaModal({ open, onClose, media }) {
         </div>
 
         <div className="bg-black flex items-center justify-center">
-          {isVideo ? (
+          {isTikTok ? (
+            <div className="w-full p-6 flex flex-col items-center justify-center gap-4">
+              {media.thumb ? (
+                <img
+                  src={media.thumb}
+                  alt=""
+                  className="w-full max-h-[68vh] object-contain rounded-xl"
+                />
+              ) : null}
+
+              <div className="text-center text-white/65 text-sm">
+                TikTok direct stream URL available nahi hoti. Preview dekhne ke liye TikTok par open karein.
+              </div>
+
+              {media.url ? (
+                <a
+                  href={media.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-5 py-3 rounded-xl bg-primary text-background-dark font-bold text-sm hover:opacity-95"
+                >
+                  Open on TikTok
+                </a>
+              ) : null}
+            </div>
+          ) : isVideo ? (
             <video
               src={media.url}
               controls
@@ -142,7 +172,11 @@ function extractMedia(tab, item) {
     }
 
     if (img) {
-      return { type: "image", url: img, thumb: img };
+      return {
+        type: "image",
+        url: img,
+        thumb: img,
+      };
     }
 
     return null;
@@ -164,13 +198,14 @@ function extractMedia(tab, item) {
 
   if (tab === "tiktok") {
     const cover = item.cover_image_url || "";
-    const shareUrl = item.share_url || item.embed_link || "";
-    if (!cover && !shareUrl) return null;
+    const openUrl = item.embed_link || item.share_url || "";
+
+    if (!cover && !openUrl) return null;
 
     return {
-      type: "video",
-      url: shareUrl || "",
-      thumb: cover || "",
+      type: "tiktok",
+      url: openUrl,
+      thumb: cover,
     };
   }
 
@@ -230,6 +265,7 @@ function TrendingPanel({ tab, items, onOpenMedia }) {
                     onOpenMedia?.({
                       type: m.type,
                       url: m.url,
+                      thumb: m.thumb,
                       title:
                         tab === "facebook"
                           ? "Facebook Media"
@@ -249,16 +285,16 @@ function TrendingPanel({ tab, items, onOpenMedia }) {
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                       />
                     ) : null}
+
                     <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                       <span className="material-symbols-outlined text-primary text-xl">
                         play_circle
                       </span>
                     </div>
-                    {m?.type === "video" ? (
-                      <span className="absolute bottom-1 right-1 bg-black/80 text-[10px] text-white px-1.5 py-0.5 rounded">
-                        VIDEO
-                      </span>
-                    ) : null}
+
+                    <span className="absolute bottom-1 right-1 bg-black/80 text-[10px] text-white px-1.5 py-0.5 rounded">
+                      {tab === "tiktok" ? "TIKTOK" : m?.type === "video" ? "VIDEO" : "IMAGE"}
+                    </span>
                   </div>
 
                   <div className="min-w-0 flex-1">
@@ -308,6 +344,7 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
   const isTikTok = tab === "tiktok";
 
   const title = isFB ? "Facebook" : isIG ? "Instagram" : "TikTok";
+
   const when = isFB
     ? fmtWhen(item.created_time)
     : isIG
@@ -340,7 +377,13 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
   const views = isTikTok ? item.metrics?.views ?? null : null;
 
   const media = extractMedia(tab, item);
-  const canOpenMedia = media?.type === "video" ? !!media?.url : !!media?.url;
+
+  const canOpenMedia =
+    tab === "tiktok"
+      ? !!(media?.url || media?.thumb)
+      : media?.type === "video"
+      ? !!media?.url
+      : !!media?.url;
 
   return (
     <div className="rounded-2xl overflow-hidden border border-primary/10 bg-surface-dark/50 backdrop-blur-md">
@@ -376,6 +419,7 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
               >
                 👍 Like
               </button>
+
               <button
                 onClick={onComment}
                 className="px-3 py-2 rounded-xl border border-primary/15 bg-background-dark/30 text-white/80 text-xs font-bold hover:bg-white/5"
@@ -384,6 +428,7 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
               >
                 💬 Comment
               </button>
+
               <button
                 onClick={onOpenComments}
                 className="px-3 py-2 rounded-xl bg-primary/15 border border-primary/25 text-primary text-xs font-bold hover:bg-primary/20"
@@ -392,6 +437,7 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
               >
                 Comments
               </button>
+
               {item.permalink_url ? (
                 <a
                   className="px-3 py-2 rounded-xl border border-primary/15 bg-background-dark/30 text-white/80 text-xs font-bold hover:bg-white/5"
@@ -418,10 +464,10 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
             </>
           ) : (
             <>
-              {item.share_url ? (
+              {item.share_url || item.embed_link ? (
                 <a
                   className="px-3 py-2 rounded-xl border border-primary/15 bg-background-dark/30 text-white/80 text-xs font-bold hover:bg-white/5"
-                  href={item.share_url}
+                  href={item.embed_link || item.share_url}
                   target="_blank"
                   rel="noreferrer"
                 >
@@ -439,9 +485,11 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
           disabled={!canOpenMedia}
           onClick={() => {
             if (!canOpenMedia) return;
+
             onOpenMedia?.({
               type: media.type,
               url: media.url,
+              thumb: media.thumb,
               title: `${title} Media`,
               subtitle: isFB
                 ? clampText(item.message || item.story || item.id, 80)
@@ -450,7 +498,7 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
                 : clampText(item.caption || item.title || item.id, 80),
             });
           }}
-          title={canOpenMedia ? "Open media" : "Video source not available"}
+          title={canOpenMedia ? "Open media" : "Media not available"}
           type="button"
         >
           <div className="relative aspect-video overflow-hidden">
@@ -462,23 +510,20 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
               />
             ) : null}
 
-            {media.type === "video" ? (
-              <>
-                <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <div className="size-20 rounded-full bg-primary/20 backdrop-blur-md flex items-center justify-center group-hover:scale-110 transition-transform duration-300 border border-primary/20">
-                    <span className="material-symbols-outlined text-primary text-5xl">
-                      play_arrow
-                    </span>
-                  </div>
-                </div>
+            <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />
 
-                {!canOpenMedia ? (
-                  <div className="absolute bottom-3 left-3 text-[11px] text-white/80 bg-black/60 border border-white/10 px-2 py-1 rounded">
-                    Video URL not returned by API
-                  </div>
-                ) : null}
-              </>
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="size-20 rounded-full bg-primary/20 backdrop-blur-md flex items-center justify-center group-hover:scale-110 transition-transform duration-300 border border-primary/20">
+                <span className="material-symbols-outlined text-primary text-5xl">
+                  {isTikTok ? "open_in_new" : media?.type === "video" ? "play_arrow" : "image"}
+                </span>
+              </div>
+            </div>
+
+            {!canOpenMedia ? (
+              <div className="absolute bottom-3 left-3 text-[11px] text-white/80 bg-black/60 border border-white/10 px-2 py-1 rounded">
+                Media URL not available
+              </div>
             ) : null}
           </div>
         </button>
@@ -572,33 +617,37 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
           <>
             <button
               onClick={() => {
-                if (canOpenMedia) {
-                  onOpenMedia?.({
-                    type: media.type,
-                    url: media.url,
-                    title: isIG ? "Instagram Media" : "TikTok Video",
-                  });
-                }
+                if (!canOpenMedia) return;
+
+                onOpenMedia?.({
+                  type: media.type,
+                  url: media.url,
+                  thumb: media.thumb,
+                  title: isIG ? "Instagram Media" : "TikTok Video",
+                  subtitle: isIG
+                    ? clampText(item.caption || item.id, 80)
+                    : clampText(item.caption || item.title || item.id, 80),
+                });
               }}
               className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl hover:bg-primary/10 transition-all text-slate-300 hover:text-primary disabled:opacity-50"
               disabled={!canOpenMedia}
               type="button"
             >
               <span className="material-symbols-outlined text-xl">
-                {media?.type === "video" ? "play_circle" : "image"}
+                {isTikTok ? "open_in_new" : media?.type === "video" ? "play_circle" : "image"}
               </span>
               <span className="text-xs font-bold uppercase tracking-widest">
-                {media?.type === "video" ? "Play" : "View"}
+                {isTikTok ? "Preview" : media?.type === "video" ? "Play" : "View"}
               </span>
             </button>
 
             <button
               onClick={() => {
-                const openUrl = isIG ? item.permalink : item.share_url;
+                const openUrl = isIG ? item.permalink : item.embed_link || item.share_url;
                 if (openUrl) window.open(openUrl, "_blank", "noreferrer");
               }}
               className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl hover:bg-primary/10 transition-all text-slate-300 hover:text-primary disabled:opacity-50"
-              disabled={!(isIG ? item.permalink : item.share_url)}
+              disabled={!(isIG ? item.permalink : item.embed_link || item.share_url)}
               type="button"
             >
               <span className="material-symbols-outlined text-xl">open_in_new</span>
@@ -638,7 +687,7 @@ export default function Feeds({ theme, setTheme }) {
     localStorage.getItem("active_workspace_id") || ""
   );
 
-  const [tab, setTab] = useState("facebook"); // facebook | instagram | tiktok
+  const [tab, setTab] = useState("facebook");
   const [channels, setChannels] = useState([]);
   const [selectedChannelId, setSelectedChannelId] = useState("");
 
@@ -711,6 +760,7 @@ export default function Feeds({ theme, setTheme }) {
       setSelectedChannelId("");
       return;
     }
+
     if (!filteredChannels.some((c) => c.id === selectedChannelId)) {
       setSelectedChannelId(filteredChannels[0].id);
     }
@@ -723,6 +773,7 @@ export default function Feeds({ theme, setTheme }) {
     setSelectedChannelId("");
     setErr("");
     setQ("");
+
     setTimeout(() => {
       feedTopRef.current?.scrollIntoView?.({
         behavior: "smooth",
@@ -785,8 +836,10 @@ export default function Feeds({ theme, setTheme }) {
   function onSelectWorkspace(id) {
     const wsId = String(id || "");
     setWorkspaceId(wsId);
+
     if (wsId) localStorage.setItem("active_workspace_id", wsId);
     else localStorage.removeItem("active_workspace_id");
+
     setItems([]);
     setPaging(null);
     setSelectedChannelId("");
@@ -821,8 +874,10 @@ export default function Feeds({ theme, setTheme }) {
 
   async function loadMoreComments() {
     if (!cmPost?.id || !cmPaging?.cursors?.after) return;
+
     setCmLoading(true);
     setCmErr("");
+
     try {
       const j = await fetchFacebookComments({
         workspaceId,
@@ -846,6 +901,7 @@ export default function Feeds({ theme, setTheme }) {
 
     setCmPosting(true);
     setCmErr("");
+
     try {
       await replyFacebookComment({
         workspaceId,
@@ -853,6 +909,7 @@ export default function Feeds({ theme, setTheme }) {
         commentId,
         message: msg,
       });
+
       setCmReply("");
 
       const j = await fetchFacebookComments({
@@ -886,6 +943,7 @@ export default function Feeds({ theme, setTheme }) {
   async function doCommentPost(postId) {
     const msg = prompt("Write comment:");
     if (!msg) return;
+
     try {
       await commentFacebookPost({
         workspaceId,
@@ -1078,6 +1136,7 @@ export default function Feeds({ theme, setTheme }) {
                     >
                       Load more
                     </button>
+
                     {loading ? (
                       <div className="text-sm text-white/50 py-2">Loading…</div>
                     ) : null}
@@ -1107,6 +1166,7 @@ export default function Feeds({ theme, setTheme }) {
                     Post: {(cmPost?.message || cmPost?.story || "").slice(0, 80) || cmPost?.id}
                   </div>
                 </div>
+
                 <button
                   className="px-3 py-2 rounded-xl border border-primary/10 bg-surface-dark text-white/70 hover:bg-white/5 text-xs font-bold"
                   onClick={() => setCmOpen(false)}
@@ -1141,6 +1201,7 @@ export default function Feeds({ theme, setTheme }) {
                         {c.created_time ? new Date(c.created_time).toLocaleString() : ""}
                       </div>
                     </div>
+
                     <div className="mt-2 text-sm text-white/90 whitespace-pre-wrap">
                       {c.message || "—"}
                     </div>
