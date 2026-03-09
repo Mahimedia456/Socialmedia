@@ -1,6 +1,12 @@
+// src/pages/Publisher.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import AppShell from "../components/AppShell.jsx";
-import { apiFetch, getActiveWorkspaceId, setActiveWorkspaceId, getSession } from "../lib/api.js";
+import {
+  apiFetch,
+  getActiveWorkspaceId,
+  setActiveWorkspaceId,
+  getSession,
+} from "../lib/api.js";
 
 const ICON_BY_PLATFORM = {
   facebook: {
@@ -10,6 +16,10 @@ const ICON_BY_PLATFORM = {
   instagram: {
     icon: "photo_camera",
     cls: "bg-pink-600/20 border-pink-600/40 text-pink-400",
+  },
+  tiktok: {
+    icon: "music_note",
+    cls: "bg-white/10 border-white/20 text-white",
   },
 };
 
@@ -25,12 +35,25 @@ function isVideoFile(file) {
   return !!file && String(file.type || "").startsWith("video/");
 }
 
+function extFromUrl(url) {
+  const s = String(url || "").toLowerCase().split("?")[0];
+  const idx = s.lastIndexOf(".");
+  return idx >= 0 ? s.slice(idx) : "";
+}
+
+function mediaKindFromUrl(url) {
+  const ext = extFromUrl(url);
+  if ([".jpg", ".jpeg", ".png", ".webp"].includes(ext)) return "image";
+  if ([".mp4", ".mov", ".webm", ".m4v"].includes(ext)) return "video";
+  return "";
+}
+
 export default function Publisher({ theme, setTheme }) {
   const API_BASE = import.meta.env.VITE_API_BASE?.trim();
-
   const fileInputRef = useRef(null);
 
   const [topTab, setTopTab] = useState("drafts"); // drafts | scheduled | sent
+  const [previewPlatform, setPreviewPlatform] = useState("facebook"); // facebook | instagram | tiktok
 
   const [postType, setPostType] = useState("text"); // text | image | video | link
   const [text, setText] = useState("");
@@ -62,7 +85,7 @@ export default function Publisher({ theme, setTheme }) {
   const [uploadedMediaKind, setUploadedMediaKind] = useState(""); // image | video
   const [uploadMeta, setUploadMeta] = useState(null);
 
-  const limit = 280;
+  const limit = 2200;
   const count = useMemo(() => (text || "").length, [text]);
 
   const selectedChannels = useMemo(() => {
@@ -70,20 +93,35 @@ export default function Publisher({ theme, setTheme }) {
     return channels.filter((c) => set.has(c.id));
   }, [channels, selectedChannelIds]);
 
-  const hasInstagramSelected = useMemo(() => {
-    return selectedChannels.some((c) => c.platform === "instagram");
-  }, [selectedChannels]);
+  const hasFacebookSelected = useMemo(
+    () => selectedChannels.some((c) => c.platform === "facebook"),
+    [selectedChannels]
+  );
 
-  const hasFacebookSelected = useMemo(() => {
-    return selectedChannels.some((c) => c.platform === "facebook");
-  }, [selectedChannels]);
+  const hasInstagramSelected = useMemo(
+    () => selectedChannels.some((c) => c.platform === "instagram"),
+    [selectedChannels]
+  );
 
-  const requiresMedia = useMemo(() => {
-    return postType === "image" || postType === "video" || hasInstagramSelected;
-  }, [postType, hasInstagramSelected]);
+  const hasTikTokSelected = useMemo(
+    () => selectedChannels.some((c) => c.platform === "tiktok"),
+    [selectedChannels]
+  );
+
+  const selectedPlatforms = useMemo(() => {
+    const uniq = new Set(selectedChannels.map((c) => c.platform));
+    return Array.from(uniq);
+  }, [selectedChannels]);
 
   const composerMediaUrl = uploadedMediaUrl || "";
   const composerMediaPreview = localPreviewUrl || uploadedMediaUrl || "";
+
+  const requiresMedia = useMemo(() => {
+    if (postType === "image" || postType === "video") return true;
+    if (hasInstagramSelected) return true;
+    if (hasTikTokSelected) return true;
+    return false;
+  }, [postType, hasInstagramSelected, hasTikTokSelected]);
 
   function setWorkspaceId(id) {
     const wsId = String(id || "");
@@ -102,14 +140,14 @@ export default function Publisher({ theme, setTheme }) {
     );
   }
 
-  const toggleChannel = (id) => {
+  function toggleChannel(id) {
     setSelectedChannelIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
-  };
+  }
 
   function buildScheduledISO() {
     if (!date || !time) return null;
@@ -155,8 +193,9 @@ export default function Publisher({ theme, setTheme }) {
     setErr("");
     try {
       const j = await apiFetch(
-        `/api/workspaces/${encodeURIComponent(wsId)}/publisher/channels?provider=meta`
+        `/api/workspaces/${encodeURIComponent(wsId)}/publisher/channels`
       );
+
       const rows = j?.channels || [];
       setChannels(rows);
 
@@ -226,6 +265,25 @@ export default function Publisher({ theme, setTheme }) {
     };
   }, [localPreviewUrl]);
 
+  useEffect(() => {
+    if (hasTikTokSelected) {
+      setPreviewPlatform("tiktok");
+      if (postType === "text" || postType === "link" || postType === "image") {
+        setPostType("video");
+      }
+    } else if (hasInstagramSelected && previewPlatform === "tiktok") {
+      setPreviewPlatform("instagram");
+    } else if (hasFacebookSelected && !hasInstagramSelected && !hasTikTokSelected) {
+      setPreviewPlatform("facebook");
+    }
+  }, [
+    hasFacebookSelected,
+    hasInstagramSelected,
+    hasTikTokSelected,
+    previewPlatform,
+    postType,
+  ]);
+
   async function uploadMediaFile(file) {
     if (!file) throw new Error("No file selected.");
     if (!API_BASE) throw new Error("Missing VITE_API_BASE");
@@ -240,9 +298,7 @@ export default function Publisher({ theme, setTheme }) {
 
     const res = await fetch(`${API_BASE}/api/uploads`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
+      headers: { Authorization: `Bearer ${token}` },
       body: form,
     });
 
@@ -272,6 +328,10 @@ export default function Publisher({ theme, setTheme }) {
 
       if (postType === "video" && !isVideoFile(file)) {
         throw new Error("Selected file is not a video.");
+      }
+
+      if (hasTikTokSelected && !isVideoFile(file)) {
+        throw new Error("TikTok publishing currently requires a video file.");
       }
 
       if (!isImageFile(file) && !isVideoFile(file)) {
@@ -314,18 +374,14 @@ export default function Publisher({ theme, setTheme }) {
 
   async function createPost(action) {
     if (!workspaceId) throw new Error("Select workspace.");
-    if (!selectedChannelIds.size) throw new Error("Select at least one page/account.");
+    if (!selectedChannelIds.size) throw new Error("Select at least one channel.");
 
     if (postType === "link" && linkUrl && !/^https?:\/\//i.test(linkUrl)) {
       throw new Error("Link URL must start with http:// or https://");
     }
 
     if (requiresMedia && !composerMediaUrl) {
-      throw new Error("Please upload an image or video first.");
-    }
-
-    if (hasInstagramSelected && !composerMediaUrl) {
-      throw new Error("Instagram publishing requires uploaded media.");
+      throw new Error("Please upload media first.");
     }
 
     if (postType === "image" && uploadedMediaKind && uploadedMediaKind !== "image") {
@@ -336,13 +392,36 @@ export default function Publisher({ theme, setTheme }) {
       throw new Error("Video post selected but uploaded file is not a video.");
     }
 
+    if (hasInstagramSelected && !composerMediaUrl) {
+      throw new Error("Instagram publishing requires media.");
+    }
+
+    if (hasTikTokSelected) {
+      if (!composerMediaUrl) {
+        throw new Error("TikTok publishing requires media.");
+      }
+
+      const kind = uploadedMediaKind || mediaKindFromUrl(composerMediaUrl);
+      if (kind !== "video") {
+        throw new Error("TikTok publishing currently requires video only.");
+      }
+
+      if (postType !== "video") {
+        throw new Error("For TikTok, select Video post type.");
+      }
+
+      if (action === "scheduled") {
+        throw new Error("TikTok scheduling is not wired yet in this UI. Publish now or save draft.");
+      }
+    }
+
     if (action === "scheduled") {
       const iso = buildScheduledISO();
       if (!iso) throw new Error("Select schedule Date and Time.");
     }
 
     const body = {
-      action, // draft | scheduled | publish_now
+      action,
       content_type: postType,
       text,
       link_url: postType === "link" ? linkUrl : "",
@@ -351,10 +430,13 @@ export default function Publisher({ theme, setTheme }) {
       channel_ids: Array.from(selectedChannelIds),
     };
 
-    const j = await apiFetch(`/api/workspaces/${encodeURIComponent(workspaceId)}/publisher/posts`, {
-      method: "POST",
-      body,
-    });
+    const j = await apiFetch(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/publisher/posts`,
+      {
+        method: "POST",
+        body,
+      }
+    );
 
     await loadLists(workspaceId);
     return j;
@@ -393,7 +475,7 @@ export default function Publisher({ theme, setTheme }) {
       setSubmitting(true);
       setErr("");
 
-      if (scheduleOn) {
+      if (scheduleOn && !hasTikTokSelected) {
         await createPost("scheduled");
         alert("Scheduled successfully.");
       } else {
@@ -428,10 +510,7 @@ export default function Publisher({ theme, setTheme }) {
       setErr("");
       await apiFetch(
         `/api/workspaces/${encodeURIComponent(workspaceId)}/publisher/posts/${encodeURIComponent(postId)}/publish`,
-        {
-          method: "POST",
-          body: {},
-        }
+        { method: "POST", body: {} }
       );
       await loadLists(workspaceId);
       alert("Published successfully.");
@@ -442,6 +521,13 @@ export default function Publisher({ theme, setTheme }) {
       setSubmitting(false);
     }
   }
+
+  const previewTitle =
+    previewPlatform === "facebook"
+      ? "Facebook Preview"
+      : previewPlatform === "instagram"
+      ? "Instagram Preview"
+      : "TikTok Preview";
 
   return (
     <AppShell theme={theme} setTheme={setTheme} active="publisher" topTitle={null}>
@@ -456,7 +542,9 @@ export default function Publisher({ theme, setTheme }) {
                 onClick={() => setTopTab("drafts")}
                 className={cn(
                   "px-4 py-1.5 text-xs font-semibold rounded-md transition-colors",
-                  topTab === "drafts" ? "bg-primary text-background-dark" : "text-slate-400 hover:text-white"
+                  topTab === "drafts"
+                    ? "bg-primary text-background-dark"
+                    : "text-slate-400 hover:text-white"
                 )}
               >
                 Drafts
@@ -466,7 +554,9 @@ export default function Publisher({ theme, setTheme }) {
                 onClick={() => setTopTab("scheduled")}
                 className={cn(
                   "px-4 py-1.5 text-xs font-semibold rounded-md transition-colors",
-                  topTab === "scheduled" ? "bg-primary text-background-dark" : "text-slate-400 hover:text-white"
+                  topTab === "scheduled"
+                    ? "bg-primary text-background-dark"
+                    : "text-slate-400 hover:text-white"
                 )}
               >
                 Scheduled
@@ -476,7 +566,9 @@ export default function Publisher({ theme, setTheme }) {
                 onClick={() => setTopTab("sent")}
                 className={cn(
                   "px-4 py-1.5 text-xs font-semibold rounded-md transition-colors",
-                  topTab === "sent" ? "bg-primary text-background-dark" : "text-slate-400 hover:text-white"
+                  topTab === "sent"
+                    ? "bg-primary text-background-dark"
+                    : "text-slate-400 hover:text-white"
                 )}
               >
                 Sent
@@ -493,14 +585,6 @@ export default function Publisher({ theme, setTheme }) {
             >
               Reset
             </button>
-
-            <div className="size-8 rounded-full overflow-hidden border border-primary/20">
-              <img
-                className="w-full h-full object-cover"
-                alt="User avatar"
-                src="https://lh3.googleusercontent.com/aida-public/AB6AXuDBTPQjjm_YS9lOkrXh7Xp081b-SiK07VbVLFSCkFrfQlnR3rHoDg5GYEVb0TdDmzSBsBKL_4o1ScXD2W54w3V_mx-77qp7ymtOil1oXWCR2a9ssLW-tzNFCMdg1mjzvyH84UX0QJWcl8MnNDSD9UHVNA_aXRWTK1i3DUNbAjjS46S-TAN2q5Kf5Yuq5-zx7vdKnC4RZ99bw_ghhBc2tzdeTtcouHs-1duc7mJ4YShRANMks7nWRLEhtMRYrtfZF_2a5sqLtvvGeOA"
-              />
-            </div>
           </div>
         </header>
 
@@ -537,7 +621,7 @@ export default function Publisher({ theme, setTheme }) {
 
             <div className="mb-8">
               <h3 className="text-sm font-bold uppercase tracking-widest text-primary mb-4">
-                Platforms & Pages
+                Platforms & Channels
               </h3>
 
               <div className="flex flex-wrap gap-2">
@@ -561,7 +645,7 @@ export default function Publisher({ theme, setTheme }) {
                       title={`${c.platform} • ${c.external_id}`}
                     >
                       <span className="material-symbols-outlined text-lg">{style.icon}</span>
-                      <span className="truncate max-w-[300px]">{c.display_name}</span>
+                      <span className="truncate max-w-[320px]">{c.display_name}</span>
                     </button>
                   );
                 })}
@@ -573,15 +657,21 @@ export default function Publisher({ theme, setTheme }) {
                 </div>
               ) : null}
 
+              {selectedPlatforms.length ? (
+                <div className="mt-3 text-[11px] text-slate-500">
+                  Selected: {selectedPlatforms.join(", ")}
+                </div>
+              ) : null}
+
               {hasInstagramSelected ? (
-                <div className="mt-3 text-[11px] text-amber-300 font-bold">
+                <div className="mt-2 text-[11px] text-amber-300 font-bold">
                   Instagram selected → uploaded media required.
                 </div>
               ) : null}
 
-              {hasFacebookSelected ? (
-                <div className="mt-1 text-[11px] text-slate-500">
-                  Facebook supports text, link, image, and video.
+              {hasTikTokSelected ? (
+                <div className="mt-2 text-[11px] text-cyan-300 font-bold">
+                  TikTok selected → video required. Text/link-only publish allowed nahi.
                 </div>
               ) : null}
             </div>
@@ -598,17 +688,23 @@ export default function Publisher({ theme, setTheme }) {
                   { key: "link", icon: "link", label: "Link" },
                 ].map((t) => {
                   const active = postType === t.key;
+                  const disabled =
+                    hasTikTokSelected &&
+                    (t.key === "text" || t.key === "link" || t.key === "image");
+
                   return (
                     <button
                       key={t.key}
                       type="button"
-                      onClick={() => setPostType(t.key)}
+                      onClick={() => !disabled && setPostType(t.key)}
+                      disabled={disabled}
                       className={cn(
                         "flex flex-col items-center justify-center gap-2 p-4 rounded-xl border transition-all",
                         "bg-white/3 backdrop-blur-md",
                         active
                           ? "border-primary/30 bg-primary/10 text-primary"
-                          : "border-transparent hover:border-primary/20 text-slate-400"
+                          : "border-transparent hover:border-primary/20 text-slate-400",
+                        disabled && "opacity-35 cursor-not-allowed"
                       )}
                     >
                       <span className="material-symbols-outlined">{t.icon}</span>
@@ -627,7 +723,7 @@ export default function Publisher({ theme, setTheme }) {
               <div className="bg-white/3 backdrop-blur-md rounded-2xl overflow-hidden border border-white/5">
                 <textarea
                   className="w-full bg-transparent border-none p-6 text-slate-100 focus:ring-0 placeholder:text-slate-600 resize-none text-lg leading-relaxed"
-                  placeholder="What's happening?"
+                  placeholder="Write your caption..."
                   rows={6}
                   value={text}
                   onChange={(e) => setText(e.target.value)}
@@ -690,7 +786,7 @@ export default function Publisher({ theme, setTheme }) {
                   Click to upload image or video
                 </p>
                 <p className="text-[10px] text-slate-500">
-                  Supports JPG, PNG, WEBP, MP4, MOV
+                  Supports JPG, PNG, WEBP, MP4, MOV, WEBM
                 </p>
               </button>
 
@@ -744,12 +840,18 @@ export default function Publisher({ theme, setTheme }) {
                       type="checkbox"
                       checked={scheduleOn}
                       onChange={(e) => setScheduleOn(e.target.checked)}
+                      disabled={hasTikTokSelected}
                     />
                     <div className="w-11 h-6 bg-slate-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-primary" />
                   </label>
                 </div>
 
-                <div className={cn("grid grid-cols-2 gap-4", !scheduleOn ? "opacity-40 pointer-events-none" : "")}>
+                <div
+                  className={cn(
+                    "grid grid-cols-2 gap-4",
+                    (!scheduleOn || hasTikTokSelected) && "opacity-40 pointer-events-none"
+                  )}
+                >
                   <div className="space-y-2">
                     <p className="text-[10px] font-bold text-slate-500 uppercase tracking-tighter">
                       Date
@@ -775,9 +877,13 @@ export default function Publisher({ theme, setTheme }) {
                   </div>
                 </div>
 
-                {!scheduleOn ? (
+                {hasTikTokSelected ? (
+                  <p className="mt-4 text-[11px] text-amber-300">
+                    TikTok scheduling yahan disabled hai. Publish now ya draft use karo.
+                  </p>
+                ) : !scheduleOn ? (
                   <p className="mt-4 text-[11px] text-slate-500">
-                    Scheduling is OFF → the main button will publish immediately.
+                    Scheduling is OFF → main button will publish immediately.
                   </p>
                 ) : null}
               </div>
@@ -792,7 +898,7 @@ export default function Publisher({ theme, setTheme }) {
               >
                 {submitting || uploading
                   ? "Please wait..."
-                  : scheduleOn
+                  : scheduleOn && !hasTikTokSelected
                   ? "Schedule Post"
                   : "Publish Now"}
               </button>
@@ -828,6 +934,7 @@ export default function Publisher({ theme, setTheme }) {
                           <button
                             className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-primary/20 text-xs font-bold text-slate-200"
                             onClick={() => handlePublishDraft(p.id)}
+                            type="button"
                           >
                             Publish
                           </button>
@@ -880,46 +987,69 @@ export default function Publisher({ theme, setTheme }) {
           <section className="w-[520px] bg-black/20 p-6 overflow-y-auto custom-scrollbar flex flex-col items-center shrink-0">
             <div className="w-full max-w-md mb-6 flex items-center justify-between">
               <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-slate-500">
-                Live Preview
+                {previewTitle}
               </h3>
 
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  className="size-8 rounded-lg bg-primary text-background-dark flex items-center justify-center"
+                  className={cn(
+                    "size-8 rounded-lg flex items-center justify-center transition-all",
+                    previewPlatform === "facebook"
+                      ? "bg-primary text-background-dark"
+                      : "bg-white/3 border border-white/5 text-slate-400 hover:text-primary"
+                  )}
+                  onClick={() => setPreviewPlatform("facebook")}
                   title="Facebook preview"
                 >
                   <span className="material-symbols-outlined text-sm">social_leaderboard</span>
                 </button>
+
                 <button
                   type="button"
-                  className="size-8 rounded-lg bg-white/3 border border-white/5 text-slate-400 flex items-center justify-center hover:text-primary transition-colors"
+                  className={cn(
+                    "size-8 rounded-lg flex items-center justify-center transition-all",
+                    previewPlatform === "instagram"
+                      ? "bg-primary text-background-dark"
+                      : "bg-white/3 border border-white/5 text-slate-400 hover:text-primary"
+                  )}
+                  onClick={() => setPreviewPlatform("instagram")}
                   title="Instagram preview"
                 >
                   <span className="material-symbols-outlined text-sm">photo_camera</span>
+                </button>
+
+                <button
+                  type="button"
+                  className={cn(
+                    "size-8 rounded-lg flex items-center justify-center transition-all",
+                    previewPlatform === "tiktok"
+                      ? "bg-primary text-background-dark"
+                      : "bg-white/3 border border-white/5 text-slate-400 hover:text-primary"
+                  )}
+                  onClick={() => setPreviewPlatform("tiktok")}
+                  title="TikTok preview"
+                >
+                  <span className="material-symbols-outlined text-sm">music_note</span>
                 </button>
               </div>
             </div>
 
             <div className="w-full max-w-md bg-white/3 border border-white/5 rounded-[22px] overflow-hidden shadow-2xl">
               <div className="p-4 flex items-center gap-3">
-                <div className="size-10 rounded-full overflow-hidden bg-slate-700">
-                  <img
-                    className="w-full h-full object-cover"
-                    alt="Preview avatar"
-                    src="https://lh3.googleusercontent.com/aida-public/AB6AXuDVzoSCJGfkGKxG78M6oePNdE-isyct66z7bvtLEK_Pu6ZZKT_a4UlRCZR0-4AungV-35gdqNWoDLxYtg_3YLLWIdNSCpkhv9pBlBJrfQ6EHPFeFTNBa81MfEMZeGgclmUx6AsiNXDoMDz-w-hLQdPvMMfIHSjfblfkaFnB8NVO2H6Smb6AM0awFefAOhKRtDaCUogBYgV0nYn0GyoCCaR7DT8_mTPcCEBGCqB7g-qrjw2Kokf7_BIgzapw8KrDwgp44oGf-NOvg0I"
-                  />
+                <div className="size-10 rounded-full overflow-hidden bg-slate-700 flex items-center justify-center text-white">
+                  <span className="material-symbols-outlined">person</span>
                 </div>
                 <div>
-                  <p className="text-sm font-bold text-white">Unified Studio</p>
-                  <p className="text-[11px] text-slate-500">
-                    Just now •{" "}
-                    <span className="material-symbols-outlined text-[10px] align-middle">public</span>
+                  <p className="text-sm font-bold text-white">
+                    {previewPlatform === "facebook"
+                      ? "Facebook Page"
+                      : previewPlatform === "instagram"
+                      ? "Instagram Account"
+                      : "TikTok Account"}
                   </p>
+                  <p className="text-[11px] text-slate-500">Just now</p>
                 </div>
-                <button className="ml-auto material-symbols-outlined text-slate-400" type="button">
-                  more_horiz
-                </button>
               </div>
 
               <div className="px-4 py-2">
@@ -951,42 +1081,77 @@ export default function Publisher({ theme, setTheme }) {
               </div>
 
               <div className="p-4 border-t border-white/5 flex items-center justify-between">
-                <div className="flex items-center -space-x-1.5">
-                  <div className="size-5 rounded-full bg-blue-500 flex items-center justify-center border-2 border-slate-900">
-                    <span className="material-symbols-outlined text-[10px] text-white">thumb_up</span>
-                  </div>
-                  <div className="size-5 rounded-full bg-red-500 flex items-center justify-center border-2 border-slate-900">
-                    <span className="material-symbols-outlined text-[10px] text-white">favorite</span>
-                  </div>
-                  <p className="text-xs text-slate-500 ml-4">1.2k</p>
-                </div>
-
                 <div className="flex items-center gap-3 text-xs text-slate-500 font-medium">
-                  <span>24 comments</span>
-                  <span>8 shares</span>
+                  {previewPlatform === "tiktok" ? (
+                    <>
+                      <span>Views</span>
+                      <span>Likes</span>
+                      <span>Shares</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>Likes</span>
+                      <span>Comments</span>
+                      <span>Shares</span>
+                    </>
+                  )}
                 </div>
               </div>
 
               <div className="px-4 py-3 border-t border-white/5 flex items-center justify-around">
-                <button className="flex items-center gap-2 text-slate-500 font-bold text-xs" type="button">
-                  <span className="material-symbols-outlined text-lg">thumb_up</span>
-                  <span>Like</span>
-                </button>
-                <button className="flex items-center gap-2 text-slate-500 font-bold text-xs" type="button">
-                  <span className="material-symbols-outlined text-lg">chat_bubble</span>
-                  <span>Comment</span>
-                </button>
-                <button className="flex items-center gap-2 text-slate-500 font-bold text-xs" type="button">
-                  <span className="material-symbols-outlined text-lg">share</span>
-                  <span>Share</span>
-                </button>
+                {previewPlatform === "facebook" ? (
+                  <>
+                    <button className="flex items-center gap-2 text-slate-500 font-bold text-xs" type="button">
+                      <span className="material-symbols-outlined text-lg">thumb_up</span>
+                      <span>Like</span>
+                    </button>
+                    <button className="flex items-center gap-2 text-slate-500 font-bold text-xs" type="button">
+                      <span className="material-symbols-outlined text-lg">chat_bubble</span>
+                      <span>Comment</span>
+                    </button>
+                    <button className="flex items-center gap-2 text-slate-500 font-bold text-xs" type="button">
+                      <span className="material-symbols-outlined text-lg">share</span>
+                      <span>Share</span>
+                    </button>
+                  </>
+                ) : previewPlatform === "instagram" ? (
+                  <>
+                    <button className="flex items-center gap-2 text-slate-500 font-bold text-xs" type="button">
+                      <span className="material-symbols-outlined text-lg">favorite</span>
+                      <span>Like</span>
+                    </button>
+                    <button className="flex items-center gap-2 text-slate-500 font-bold text-xs" type="button">
+                      <span className="material-symbols-outlined text-lg">chat_bubble</span>
+                      <span>Comment</span>
+                    </button>
+                    <button className="flex items-center gap-2 text-slate-500 font-bold text-xs" type="button">
+                      <span className="material-symbols-outlined text-lg">send</span>
+                      <span>Send</span>
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button className="flex items-center gap-2 text-slate-500 font-bold text-xs" type="button">
+                      <span className="material-symbols-outlined text-lg">favorite</span>
+                      <span>Like</span>
+                    </button>
+                    <button className="flex items-center gap-2 text-slate-500 font-bold text-xs" type="button">
+                      <span className="material-symbols-outlined text-lg">chat_bubble</span>
+                      <span>Comment</span>
+                    </button>
+                    <button className="flex items-center gap-2 text-slate-500 font-bold text-xs" type="button">
+                      <span className="material-symbols-outlined text-lg">share</span>
+                      <span>Share</span>
+                    </button>
+                  </>
+                )}
               </div>
             </div>
 
             <div className="mt-12 w-full max-w-lg flex flex-col gap-4">
               <div className="flex items-center justify-between">
                 <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">
-                  Post Performance Estimation
+                  Post Readiness
                 </p>
                 <span className="text-[10px] text-primary bg-primary/10 px-2 py-0.5 rounded-full font-bold">
                   AI ASSISTED
@@ -995,16 +1160,20 @@ export default function Publisher({ theme, setTheme }) {
 
               <div className="grid grid-cols-3 gap-4">
                 <div className="bg-white/3 border border-white/5 p-4 rounded-xl">
-                  <p className="text-[10px] text-slate-500 font-bold uppercase mb-1">Reach</p>
-                  <p className="text-lg font-bold text-slate-100">4.2k - 8.5k</p>
+                  <p className="text-[10px] text-slate-500 font-bold uppercase mb-1">Channels</p>
+                  <p className="text-lg font-bold text-slate-100">{selectedChannels.length}</p>
                 </div>
                 <div className="bg-white/3 border border-white/5 p-4 rounded-xl">
-                  <p className="text-[10px] text-slate-500 font-bold uppercase mb-1">Engagement</p>
-                  <p className="text-lg font-bold text-slate-100">4.2%</p>
+                  <p className="text-[10px] text-slate-500 font-bold uppercase mb-1">Media</p>
+                  <p className="text-lg font-bold text-slate-100">
+                    {uploadedMediaKind || "None"}
+                  </p>
                 </div>
                 <div className="bg-white/3 border border-white/5 p-4 rounded-xl">
-                  <p className="text-[10px] text-slate-500 font-bold uppercase mb-1">Best Time</p>
-                  <p className="text-lg font-bold text-primary">09:30 AM</p>
+                  <p className="text-[10px] text-slate-500 font-bold uppercase mb-1">Mode</p>
+                  <p className="text-lg font-bold text-primary">
+                    {scheduleOn && !hasTikTokSelected ? "Scheduled" : "Publish Now"}
+                  </p>
                 </div>
               </div>
 

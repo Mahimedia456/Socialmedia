@@ -12,6 +12,11 @@ import nodemailer from "nodemailer";
 import crypto from "crypto";
 import multer from "multer";
 import createTikTokRouter from "./routes/tiktok.routes.js";
+import createTikTokPublisherRouter from "./routes/tiktok.publisher.routes.js";
+import {
+  tiktokDirectPostVideoFromUrl,
+  tiktokDirectPostPhotoFromUrl,
+} from "./services/tiktok.publisher.service.js";
 
 /* ---------------- Load .env (absolute path; Windows safe) ---------------- */
 const __filename = fileURLToPath(import.meta.url);
@@ -711,6 +716,20 @@ const tiktokRouter = createTikTokRouter({
 });
 
 app.use("/api/tiktok", tiktokRouter);
+
+
+const tiktokPublisherRouter = createTikTokPublisherRouter({
+  requireAuth,
+  isGlobalAdmin,
+  getWorkspaceMemberRole,
+  supabase,
+  tables: {
+    T_CHANNELS,
+    T_CHANNEL_TOKENS,
+  },
+});
+
+app.use("/api/tiktok/publisher", tiktokPublisherRouter);
 
 async function getChannelById({ workspaceId, channelId }) {
   const { data, error } = await supabase
@@ -1687,24 +1706,30 @@ async function runLoginAutoSyncInBackground({ userId, role }) {
    MEDIA PUBLISH HELPERS
 ============================================================ */
 
-function guessMediaKindFromUrl(url) {
-  const s = String(url || "").toLowerCase().split("?")[0];
+function guessMediaKindFromUrl(url, fallbackContentType = "") {
+  const s = String(url || "").toLowerCase().split("?")[0].split("#")[0];
+  const ct = String(fallbackContentType || "").toLowerCase();
+
   if (
     s.endsWith(".mp4") ||
     s.endsWith(".mov") ||
     s.endsWith(".m4v") ||
-    s.endsWith(".webm")
+    s.endsWith(".webm") ||
+    ct.startsWith("video/")
   ) {
     return "video";
   }
+
   if (
     s.endsWith(".jpg") ||
     s.endsWith(".jpeg") ||
     s.endsWith(".png") ||
-    s.endsWith(".webp")
+    s.endsWith(".webp") ||
+    ct.startsWith("image/")
   ) {
     return "image";
   }
+
   return "unknown";
 }
 
@@ -1876,20 +1901,18 @@ async function publishInstagramPost({ igUserId, token, caption, mediaUrl }) {
 
   const kind = guessMediaKindFromUrl(mediaUrl);
 
-  // IMAGE post
   if (kind === "image") {
-    const createUrl = new URL(
-      `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media`
-    );
-    createUrl.searchParams.set("access_token", token);
+    const createUrl = `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media`;
 
-    const r1 = await fetch(createUrl.toString(), {
+    const createBody = new URLSearchParams();
+    createBody.set("image_url", String(mediaUrl));
+    createBody.set("caption", String(caption || ""));
+    createBody.set("access_token", token);
+
+    const r1 = await fetch(createUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        image_url: mediaUrl,
-        caption: caption || "",
-      }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: createBody.toString(),
     });
 
     const j1 = await r1.json().catch(() => ({}));
@@ -1902,15 +1925,16 @@ async function publishInstagramPost({ igUserId, token, caption, mediaUrl }) {
     const creationId = j1?.id;
     if (!creationId) throw new Error("IG image container returned no id");
 
-    const pubUrl = new URL(
-      `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media_publish`
-    );
-    pubUrl.searchParams.set("access_token", token);
+    const pubUrl = `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media_publish`;
 
-    const r2 = await fetch(pubUrl.toString(), {
+    const pubBody = new URLSearchParams();
+    pubBody.set("creation_id", creationId);
+    pubBody.set("access_token", token);
+
+    const r2 = await fetch(pubUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ creation_id: creationId }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: pubBody.toString(),
     });
 
     const j2 = await r2.json().catch(() => ({}));
@@ -1923,21 +1947,19 @@ async function publishInstagramPost({ igUserId, token, caption, mediaUrl }) {
     return { kind: "image", creation_id: creationId, ...j2 };
   }
 
-  // VIDEO -> publish as REEL
   if (kind === "video") {
-    const createUrl = new URL(
-      `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media`
-    );
-    createUrl.searchParams.set("access_token", token);
+    const createUrl = `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media`;
 
-    const r1 = await fetch(createUrl.toString(), {
+    const createBody = new URLSearchParams();
+    createBody.set("media_type", "REELS");
+    createBody.set("video_url", String(mediaUrl));
+    createBody.set("caption", String(caption || ""));
+    createBody.set("access_token", token);
+
+    const r1 = await fetch(createUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        media_type: "REELS",
-        video_url: mediaUrl,
-        caption: caption || "",
-      }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: createBody.toString(),
     });
 
     const j1 = await r1.json().catch(() => ({}));
@@ -1953,19 +1975,20 @@ async function publishInstagramPost({ igUserId, token, caption, mediaUrl }) {
     await waitForIgContainerReady({
       creationId,
       token,
-      timeoutMs: 120000,
-      intervalMs: 4000,
+      timeoutMs: 180000,
+      intervalMs: 5000,
     });
 
-    const pubUrl = new URL(
-      `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media_publish`
-    );
-    pubUrl.searchParams.set("access_token", token);
+    const pubUrl = `https://graph.facebook.com/${META_GRAPH_VERSION}/${igUserId}/media_publish`;
 
-    const r2 = await fetch(pubUrl.toString(), {
+    const pubBody = new URLSearchParams();
+    pubBody.set("creation_id", creationId);
+    pubBody.set("access_token", token);
+
+    const r2 = await fetch(pubUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ creation_id: creationId }),
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: pubBody.toString(),
     });
 
     const j2 = await r2.json().catch(() => ({}));
@@ -3368,6 +3391,47 @@ app.post(
         });
       }
 
+      const { data: chans, error: chErr } = await supabase
+        .from(T_CHANNELS)
+        .select("id,workspace_id,provider,platform,external_id,display_name,meta,status")
+        .eq("workspace_id", workspaceId)
+        .in("id", selected_channel_ids);
+
+      if (chErr) throw chErr;
+
+      const hasTikTokSelected = (chans || []).some(
+        (c) => c.provider === "tiktok" && c.platform === "tiktok"
+      );
+
+      if (hasTikTokSelected) {
+        const mediaUrl = Array.isArray(media_urls) && media_urls[0]
+          ? String(media_urls[0])
+          : "";
+
+        const mediaKind = guessMediaKindFromUrl(mediaUrl);
+
+        if (!mediaUrl) {
+          return res.status(400).json({
+            error: "VALIDATION_ERROR",
+            message: "TikTok publishing requires media.",
+          });
+        }
+
+        if (mediaKind !== "video" && mediaKind !== "image") {
+          return res.status(400).json({
+            error: "VALIDATION_ERROR",
+            message: "TikTok only supports image/video media URLs.",
+          });
+        }
+
+        if (action === "scheduled") {
+          return res.status(400).json({
+            error: "VALIDATION_ERROR",
+            message: "TikTok scheduled publishing is not enabled in this backend flow.",
+          });
+        }
+      }
+
       let status = "draft";
       if (action === "scheduled") {
         if (!scheduled_at) {
@@ -3400,14 +3464,6 @@ app.post(
 
       if (postErr) throw postErr;
 
-      const { data: chans, error: chErr } = await supabase
-        .from(T_CHANNELS)
-        .select("id,workspace_id,provider,platform,external_id,display_name,meta,status")
-        .eq("workspace_id", workspaceId)
-        .in("id", selected_channel_ids);
-
-      if (chErr) throw chErr;
-
       const targetRows = (chans || []).map((c) => ({
         post_id: postRow.id,
         workspace_id: workspaceId,
@@ -3419,7 +3475,10 @@ app.post(
         meta: { channel_name: c.display_name },
       }));
 
-      const { error: tErr } = await supabase.from(T_SOCIAL_POST_TARGETS).insert(targetRows);
+      const { error: tErr } = await supabase
+        .from(T_SOCIAL_POST_TARGETS)
+        .insert(targetRows);
+
       if (tErr) throw tErr;
 
       if (action === "publish_now") {
@@ -3501,6 +3560,7 @@ async function publishPostNow({ workspaceId, postId }) {
     .eq("workspace_id", workspaceId)
     .eq("id", postId)
     .maybeSingle();
+
   if (pErr) throw pErr;
   if (!post) throw new Error("POST_NOT_FOUND");
 
@@ -3528,17 +3588,17 @@ async function publishPostNow({ workspaceId, postId }) {
         .update({ status: "publishing", error: null })
         .eq("id", t.id);
 
-      const token = await getTokenFromDB({
-        workspaceId,
-        externalId: String(t.external_id),
-        token_type: "page",
-      });
-
-      if (!token && t.provider === "meta") {
-        throw new Error(`Missing token for ${t.platform}:${t.external_id}`);
-      }
-
       if (t.provider === "meta" && t.platform === "facebook") {
+        const pageToken = await getTokenFromDB({
+          workspaceId,
+          externalId: String(t.external_id),
+          token_type: "page",
+        });
+
+        if (!pageToken) {
+          throw new Error(`Missing token for ${t.platform}:${t.external_id}`);
+        }
+
         const message = String(post.text || "");
         const link = post.link_url ? String(post.link_url) : "";
         const mediaUrls = Array.isArray(post.media_urls) ? post.media_urls : [];
@@ -3546,7 +3606,7 @@ async function publishPostNow({ workspaceId, postId }) {
 
         const r = await publishFacebookPost({
           pageId: String(t.external_id),
-          pageToken: token,
+          pageToken,
           message,
           link,
           mediaUrl,
@@ -3613,7 +3673,69 @@ async function publishPostNow({ workspaceId, postId }) {
             .eq("id", t.id)
         );
       } else if (t.provider === "tiktok" && t.platform === "tiktok") {
-        throw new Error("TikTok publishing not implemented yet");
+        const mediaUrls = Array.isArray(post.media_urls) ? post.media_urls : [];
+        const mediaUrl = mediaUrls[0] ? String(mediaUrls[0]) : "";
+        const caption = String(post.text || "");
+
+        if (!mediaUrl) {
+          throw new Error("TikTok publish requires media URL");
+        }
+
+        const kind = guessMediaKindFromUrl(mediaUrl);
+
+        const tokenRow = await supabase
+          .from(T_CHANNEL_TOKENS)
+          .select("access_token")
+          .eq("workspace_id", workspaceId)
+          .eq("provider", "tiktok")
+          .eq("external_id", String(t.external_id))
+          .eq("token_type", "access")
+          .maybeSingle();
+
+        if (tokenRow.error) throw tokenRow.error;
+
+        const tiktokAccessToken = String(tokenRow.data?.access_token || "");
+        if (!tiktokAccessToken) {
+          throw new Error("Missing TikTok access token");
+        }
+
+        let r;
+
+        if (kind === "video") {
+          r = await tiktokDirectPostVideoFromUrl({
+            accessToken: tiktokAccessToken,
+            videoUrl: mediaUrl,
+            title: caption,
+            privacyLevel: "SELF_ONLY",
+            disableComment: false,
+            disableDuet: false,
+            disableStitch: false,
+            coverTimestampMs: 1000,
+          });
+        } else if (kind === "image") {
+          r = await tiktokDirectPostPhotoFromUrl({
+            accessToken: tiktokAccessToken,
+            photoUrls: [mediaUrl],
+            title: caption,
+            description: caption,
+            privacyLevel: "SELF_ONLY",
+            disableComment: false,
+            autoAddMusic: true,
+          });
+        } else {
+          throw new Error("Unsupported TikTok media URL");
+        }
+
+        updates.push(
+          supabase
+            .from(T_SOCIAL_POST_TARGETS)
+            .update({
+              status: "published",
+              published_id: String(r?.data?.publish_id || r?.data?.share_id || ""),
+              meta: { ...(t.meta || {}), result: r },
+            })
+            .eq("id", t.id)
+        );
       } else {
         throw new Error(`Unsupported target: ${t.provider}:${t.platform}`);
       }
@@ -3635,6 +3757,7 @@ async function publishPostNow({ workspaceId, postId }) {
   await Promise.all(updates);
 
   const finalStatus = anyFailed ? "failed" : "published";
+
   const { data: post2 } = await supabase
     .from(T_SOCIAL_POSTS)
     .update({
@@ -3986,10 +4109,16 @@ app.use("/api", (req, res) => {
 
 /* ---------------- Error handler ---------------- */
 app.use((err, req, res, next) => {
-  console.error(err);
+  console.error("SERVER ERROR:", {
+    message: err?.message || "Something went wrong",
+    meta: err?.meta || null,
+    stack: err?.stack || null,
+  });
+
   res.status(500).json({
     error: "SERVER_ERROR",
-    message: err.message || "Something went wrong",
+    message: err?.message || "Something went wrong",
+    meta: err?.meta || null,
   });
 });
 
