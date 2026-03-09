@@ -1,5 +1,3 @@
-// backend/services/tiktok.service.js
-
 export function providerTikTok() {
   return "tiktok";
 }
@@ -140,4 +138,90 @@ export async function tiktokGetUserInfo({ accessToken }) {
   }
 
   return user;
+}
+
+export async function tiktokListVideos({
+  accessToken,
+  cursor = 0,
+  maxCount = 20,
+}) {
+  const safeCursor = Math.max(0, Number(cursor || 0));
+  const safeMaxCount = Math.min(20, Math.max(1, Number(maxCount || 20)));
+
+  const url = new URL("https://open.tiktokapis.com/v2/video/list/");
+  url.searchParams.set(
+    "fields",
+    [
+      "id",
+      "title",
+      "video_description",
+      "duration",
+      "height",
+      "width",
+      "cover_image_url",
+      "share_url",
+      "embed_html",
+      "embed_link",
+      "like_count",
+      "comment_count",
+      "share_count",
+      "view_count",
+      "create_time",
+    ].join(",")
+  );
+
+  const r = await fetch(url.toString(), {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+      "Cache-Control": "no-cache",
+    },
+    body: JSON.stringify({
+      cursor: safeCursor,
+      max_count: safeMaxCount,
+    }),
+  });
+
+  const raw = await r.text();
+  let j = {};
+  try {
+    j = raw ? JSON.parse(raw) : {};
+  } catch {
+    j = { raw };
+  }
+
+  console.log("TIKTOK VIDEO LIST RESPONSE:", {
+    ok: r.ok,
+    status: r.status,
+    body: j,
+  });
+
+  if (!r.ok) {
+    const msg =
+      j?.error?.message ||
+      j?.error_description ||
+      j?.message ||
+      j?.error?.code ||
+      "TikTok video list failed";
+    const e = new Error(msg);
+    e.meta = j;
+    throw e;
+  }
+
+  // TikTok v2 APIs often return 200 with embedded error object too
+  if (j?.error?.code && j?.error?.code !== "ok") {
+    const e = new Error(
+      j?.error?.message || j?.error?.code || "TikTok video list failed"
+    );
+    e.meta = j;
+    throw e;
+  }
+
+  return {
+    videos: Array.isArray(j?.data?.videos) ? j.data.videos : [],
+    cursor: Number(j?.data?.cursor || 0),
+    has_more: !!j?.data?.has_more,
+    raw: j,
+  };
 }

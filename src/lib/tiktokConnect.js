@@ -27,7 +27,7 @@ function randomString(len = 24) {
 }
 
 const DEFAULT_SCOPES = (
-  import.meta.env.VITE_TIKTOK_SCOPES || "user.info.basic,video.publish"
+  import.meta.env.VITE_TIKTOK_SCOPES || "user.info.basic,video.publish,video.list"
 )
   .split(",")
   .map((s) => s.trim())

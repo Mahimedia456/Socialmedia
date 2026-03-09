@@ -1,4 +1,3 @@
-// src/pages/Feeds.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import AppShell from "../components/AppShell.jsx";
 import { apiFetch } from "../lib/api.js";
@@ -6,6 +5,7 @@ import {
   listPublisherChannels,
   fetchFacebookFeed,
   fetchInstagramFeed,
+  fetchTikTokFeed,
   fetchFacebookComments,
   replyFacebookComment,
   likeFacebookPost,
@@ -16,9 +16,19 @@ import {
    Small helpers
 ---------------------------- */
 function pill(platform) {
-  if (platform === "facebook")
+  if (platform === "facebook") {
     return "bg-[#1877F2]/15 text-[#7db3ff] border border-[#1877F2]/25";
-  return "bg-pink-500/10 text-pink-300 border border-pink-500/20";
+  }
+
+  if (platform === "instagram") {
+    return "bg-pink-500/10 text-pink-300 border border-pink-500/20";
+  }
+
+  if (platform === "tiktok") {
+    return "bg-white/10 text-white border border-white/15";
+  }
+
+  return "bg-primary/10 text-primary border border-primary/20";
 }
 
 function fmtWhen(d) {
@@ -37,7 +47,6 @@ function clampText(s = "", n = 180) {
 
 /* ---------------------------
    Media modal (image/video)
-   ✅ Sound enabled
 ---------------------------- */
 function MediaModal({ open, onClose, media }) {
   const escClose = (e) => {
@@ -76,6 +85,7 @@ function MediaModal({ open, onClose, media }) {
           <button
             className="px-3 py-2 rounded-xl border border-white/10 text-white/70 hover:bg-white/5 text-xs font-bold"
             onClick={onClose}
+            type="button"
           >
             Close
           </button>
@@ -105,8 +115,7 @@ function MediaModal({ open, onClose, media }) {
 }
 
 /* ---------------------------
-   Extract media (FB/IG)
-   ✅ FB video no longer falls back to image as "video"
+   Extract media (FB/IG/TikTok)
 ---------------------------- */
 function extractMedia(tab, item) {
   if (!item) return null;
@@ -121,36 +130,51 @@ function extractMedia(tab, item) {
       att?.subattachments?.data?.[0]?.media?.image?.src ||
       "";
 
-    // If your backend expands "source" for videos, use it.
-    // Often FB requires extra fields/permissions for video source.
     const videoSrc = att?.media?.source || item?.source || "";
-
     const isVideo = type.includes("video") || !!videoSrc;
 
     if (isVideo) {
       return {
         type: "video",
-        url: videoSrc || "", // ✅ do NOT fallback to image
+        url: videoSrc || "",
         thumb: img || "",
       };
     }
 
-    if (img) return { type: "image", url: img, thumb: img };
+    if (img) {
+      return { type: "image", url: img, thumb: img };
+    }
+
     return null;
   }
 
-  // Instagram
-  const mediaUrl = item.media_url || "";
-  const thumb = item.thumbnail_url || item.media_url || "";
-  const isVideo = String(item.media_type || "").toUpperCase() === "VIDEO";
+  if (tab === "instagram") {
+    const mediaUrl = item.media_url || "";
+    const thumb = item.thumbnail_url || item.media_url || "";
+    const isVideo = String(item.media_type || "").toUpperCase() === "VIDEO";
 
-  if (!mediaUrl && !thumb) return null;
+    if (!mediaUrl && !thumb) return null;
 
-  return {
-    type: isVideo ? "video" : "image",
-    url: mediaUrl || thumb,
-    thumb,
-  };
+    return {
+      type: isVideo ? "video" : "image",
+      url: mediaUrl || thumb,
+      thumb,
+    };
+  }
+
+  if (tab === "tiktok") {
+    const cover = item.cover_image_url || "";
+    const shareUrl = item.share_url || item.embed_link || "";
+    if (!cover && !shareUrl) return null;
+
+    return {
+      type: "video",
+      url: shareUrl || "",
+      thumb: cover || "",
+    };
+  }
+
+  return null;
 }
 
 /* ---------------------------
@@ -180,7 +204,22 @@ function TrendingPanel({ tab, items, onOpenMedia }) {
         <div className="flex flex-col gap-4">
           {top.length ? (
             top.map(({ it, m }) => {
-              const canOpen = m?.type === "video" ? !!m?.url : !!m?.url;
+              const canOpen = !!(m?.url || m?.thumb);
+
+              const titleText =
+                tab === "facebook"
+                  ? clampText(it.message || it.story || "Facebook post", 60)
+                  : tab === "instagram"
+                  ? clampText(it.caption || "Instagram post", 60)
+                  : clampText(it.caption || it.title || "TikTok video", 60);
+
+              const whenText =
+                tab === "facebook"
+                  ? fmtWhen(it.created_time)
+                  : tab === "instagram"
+                  ? fmtWhen(it.timestamp)
+                  : fmtWhen(it.create_time);
+
               return (
                 <button
                   key={it.id}
@@ -191,13 +230,16 @@ function TrendingPanel({ tab, items, onOpenMedia }) {
                     onOpenMedia?.({
                       type: m.type,
                       url: m.url,
-                      title: tab === "facebook" ? "Facebook Media" : "Instagram Media",
-                      subtitle:
+                      title:
                         tab === "facebook"
-                          ? clampText(it.message || it.story || it.id, 70)
-                          : clampText(it.caption || it.id, 70),
+                          ? "Facebook Media"
+                          : tab === "instagram"
+                          ? "Instagram Media"
+                          : "TikTok Video",
+                      subtitle: titleText,
                     });
                   }}
+                  type="button"
                 >
                   <div className="relative w-28 h-20 rounded-xl overflow-hidden shrink-0 border border-primary/10 bg-black/30">
                     {m?.thumb ? (
@@ -221,12 +263,10 @@ function TrendingPanel({ tab, items, onOpenMedia }) {
 
                   <div className="min-w-0 flex-1">
                     <div className="text-sm font-bold text-slate-200 line-clamp-2 leading-snug group-hover:text-primary transition-colors">
-                      {tab === "facebook"
-                        ? clampText(it.message || it.story || "Facebook post", 60)
-                        : clampText(it.caption || "Instagram post", 60)}
+                      {titleText}
                     </div>
                     <div className="text-[10px] text-slate-500 font-medium mt-1">
-                      {tab === "facebook" ? fmtWhen(it.created_time) : fmtWhen(it.timestamp)}
+                      {whenText}
                     </div>
                   </div>
                 </button>
@@ -247,7 +287,10 @@ function TrendingPanel({ tab, items, onOpenMedia }) {
           <p className="text-xs text-slate-400 mb-4">
             Stream to 15+ channels simultaneously with enterprise security.
           </p>
-          <button className="w-full py-2 rounded-xl bg-primary text-background-dark font-bold text-xs hover:opacity-95">
+          <button
+            className="w-full py-2 rounded-xl bg-primary text-background-dark font-bold text-xs hover:opacity-95"
+            type="button"
+          >
             GO LIVE
           </button>
         </div>
@@ -261,35 +304,53 @@ function TrendingPanel({ tab, items, onOpenMedia }) {
 ---------------------------- */
 function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia }) {
   const isFB = tab === "facebook";
-  const title = isFB ? "Facebook" : "Instagram";
-  const when = isFB ? fmtWhen(item.created_time) : fmtWhen(item.timestamp);
-  const msg = isFB ? item.message || item.story || "" : item.caption || "";
+  const isIG = tab === "instagram";
+  const isTikTok = tab === "tiktok";
+
+  const title = isFB ? "Facebook" : isIG ? "Instagram" : "TikTok";
+  const when = isFB
+    ? fmtWhen(item.created_time)
+    : isIG
+    ? fmtWhen(item.timestamp)
+    : fmtWhen(item.create_time);
+
+  const msg = isFB
+    ? item.message || item.story || ""
+    : isIG
+    ? item.caption || ""
+    : item.caption || item.title || "";
 
   const likes = isFB
     ? item.likes?.summary?.total_count ?? null
-    : typeof item.like_count === "number"
-    ? item.like_count
-    : null;
+    : isIG
+    ? typeof item.like_count === "number"
+      ? item.like_count
+      : null
+    : item.metrics?.likes ?? null;
 
   const comments = isFB
     ? item.comments?.summary?.total_count ?? null
-    : typeof item.comments_count === "number"
-    ? item.comments_count
-    : null;
+    : isIG
+    ? typeof item.comments_count === "number"
+      ? item.comments_count
+      : null
+    : item.metrics?.comments ?? null;
+
+  const shares = isTikTok ? item.metrics?.shares ?? null : null;
+  const views = isTikTok ? item.metrics?.views ?? null : null;
 
   const media = extractMedia(tab, item);
   const canOpenMedia = media?.type === "video" ? !!media?.url : !!media?.url;
 
   return (
     <div className="rounded-2xl overflow-hidden border border-primary/10 bg-surface-dark/50 backdrop-blur-md">
-      {/* header */}
       <div className="p-6 flex items-start justify-between gap-4">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <div
               className={[
                 "inline-flex px-2 py-1 rounded-lg text-[10px] font-black uppercase tracking-widest border",
-                pill(isFB ? "facebook" : "instagram"),
+                pill(tab),
               ].join(" ")}
             >
               {title}
@@ -311,6 +372,7 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
                 onClick={onLike}
                 className="px-3 py-2 rounded-xl border border-primary/15 bg-background-dark/30 text-white/80 text-xs font-bold hover:bg-white/5"
                 title="Like post"
+                type="button"
               >
                 👍 Like
               </button>
@@ -318,6 +380,7 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
                 onClick={onComment}
                 className="px-3 py-2 rounded-xl border border-primary/15 bg-background-dark/30 text-white/80 text-xs font-bold hover:bg-white/5"
                 title="Add comment"
+                type="button"
               >
                 💬 Comment
               </button>
@@ -325,6 +388,7 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
                 onClick={onOpenComments}
                 className="px-3 py-2 rounded-xl bg-primary/15 border border-primary/25 text-primary text-xs font-bold hover:bg-primary/20"
                 title="View comments"
+                type="button"
               >
                 Comments
               </button>
@@ -339,7 +403,7 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
                 </a>
               ) : null}
             </>
-          ) : (
+          ) : isIG ? (
             <>
               {item.permalink ? (
                 <a
@@ -352,11 +416,23 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
                 </a>
               ) : null}
             </>
+          ) : (
+            <>
+              {item.share_url ? (
+                <a
+                  className="px-3 py-2 rounded-xl border border-primary/15 bg-background-dark/30 text-white/80 text-xs font-bold hover:bg-white/5"
+                  href={item.share_url}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Open
+                </a>
+              ) : null}
+            </>
           )}
         </div>
       </div>
 
-      {/* media (thumbnail + play overlay) */}
       {media?.thumb || media?.url ? (
         <button
           className="relative w-full block bg-black/40 group"
@@ -369,10 +445,13 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
               title: `${title} Media`,
               subtitle: isFB
                 ? clampText(item.message || item.story || item.id, 80)
-                : clampText(item.caption || item.id, 80),
+                : isIG
+                ? clampText(item.caption || item.id, 80)
+                : clampText(item.caption || item.title || item.id, 80),
             });
           }}
           title={canOpenMedia ? "Open media" : "Video source not available"}
+          type="button"
         >
           <div className="relative aspect-video overflow-hidden">
             {media.thumb ? (
@@ -405,9 +484,8 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
         </button>
       ) : null}
 
-      {/* counters */}
       <div className="px-6 py-4 border-t border-primary/10 flex items-center justify-between">
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-6 flex-wrap">
           {likes !== null ? (
             <div className="flex items-center gap-1.5 text-slate-400 text-xs">
               <span className="material-symbols-outlined text-sm text-primary">
@@ -416,26 +494,41 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
               <span>{likes}</span>
             </div>
           ) : null}
+
           {comments !== null ? (
             <div className="flex items-center gap-1.5 text-slate-400 text-xs">
               <span className="material-symbols-outlined text-sm">chat_bubble</span>
               <span>{comments}</span>
             </div>
           ) : null}
+
+          {shares !== null ? (
+            <div className="flex items-center gap-1.5 text-slate-400 text-xs">
+              <span className="material-symbols-outlined text-sm">share</span>
+              <span>{shares}</span>
+            </div>
+          ) : null}
+
+          {views !== null ? (
+            <div className="flex items-center gap-1.5 text-slate-400 text-xs">
+              <span className="material-symbols-outlined text-sm">visibility</span>
+              <span>{views}</span>
+            </div>
+          ) : null}
         </div>
 
         <div className="text-[11px] text-white/35 font-mono">
-          {isFB ? `POST: ${item.id}` : `MEDIA: ${item.id}`}
+          {isFB ? `POST: ${item.id}` : isIG ? `MEDIA: ${item.id}` : `VIDEO: ${item.id}`}
         </div>
       </div>
 
-      {/* actions */}
       <div className="p-2 border-t border-primary/10 bg-primary/[0.02] flex items-center gap-2">
         {isFB ? (
           <>
             <button
               onClick={onLike}
               className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl hover:bg-primary/10 transition-all text-slate-300 hover:text-primary"
+              type="button"
             >
               <span className="material-symbols-outlined text-xl">thumb_up</span>
               <span className="text-xs font-bold uppercase tracking-widest">Like</span>
@@ -444,6 +537,7 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
             <button
               onClick={onComment}
               className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl hover:bg-primary/10 transition-all text-slate-300 hover:text-primary"
+              type="button"
             >
               <span className="material-symbols-outlined text-xl">chat_bubble</span>
               <span className="text-xs font-bold uppercase tracking-widest">Comment</span>
@@ -452,6 +546,7 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
             <button
               onClick={onOpenComments}
               className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl hover:bg-primary/10 transition-all text-slate-300 hover:text-primary"
+              type="button"
             >
               <span className="material-symbols-outlined text-xl">forum</span>
               <span className="text-xs font-bold uppercase tracking-widest">
@@ -461,11 +556,13 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
 
             <button
               onClick={() => {
-                if (item.permalink_url)
+                if (item.permalink_url) {
                   window.open(item.permalink_url, "_blank", "noreferrer");
+                }
               }}
               className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl hover:bg-primary/10 transition-all text-slate-300 hover:text-primary disabled:opacity-50"
               disabled={!item.permalink_url}
+              type="button"
             >
               <span className="material-symbols-outlined text-xl">open_in_new</span>
               <span className="text-xs font-bold uppercase tracking-widest">Open</span>
@@ -475,15 +572,17 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
           <>
             <button
               onClick={() => {
-                if (canOpenMedia)
+                if (canOpenMedia) {
                   onOpenMedia?.({
                     type: media.type,
                     url: media.url,
-                    title: "Instagram Media",
+                    title: isIG ? "Instagram Media" : "TikTok Video",
                   });
+                }
               }}
               className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl hover:bg-primary/10 transition-all text-slate-300 hover:text-primary disabled:opacity-50"
               disabled={!canOpenMedia}
+              type="button"
             >
               <span className="material-symbols-outlined text-xl">
                 {media?.type === "video" ? "play_circle" : "image"}
@@ -495,10 +594,12 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
 
             <button
               onClick={() => {
-                if (item.permalink) window.open(item.permalink, "_blank", "noreferrer");
+                const openUrl = isIG ? item.permalink : item.share_url;
+                if (openUrl) window.open(openUrl, "_blank", "noreferrer");
               }}
               className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl hover:bg-primary/10 transition-all text-slate-300 hover:text-primary disabled:opacity-50"
-              disabled={!item.permalink}
+              disabled={!(isIG ? item.permalink : item.share_url)}
+              type="button"
             >
               <span className="material-symbols-outlined text-xl">open_in_new</span>
               <span className="text-xs font-bold uppercase tracking-widest">Open</span>
@@ -507,6 +608,7 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
             <button
               onClick={() => {}}
               className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl hover:bg-primary/10 transition-all text-slate-300 hover:text-primary"
+              type="button"
             >
               <span className="material-symbols-outlined text-xl">bookmark</span>
               <span className="text-xs font-bold uppercase tracking-widest">Save</span>
@@ -515,6 +617,7 @@ function FeedCard({ tab, item, onOpenComments, onLike, onComment, onOpenMedia })
             <button
               onClick={() => {}}
               className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl hover:bg-primary/10 transition-all text-slate-300 hover:text-primary"
+              type="button"
             >
               <span className="material-symbols-outlined text-xl">share</span>
               <span className="text-xs font-bold uppercase tracking-widest">Share</span>
@@ -535,7 +638,7 @@ export default function Feeds({ theme, setTheme }) {
     localStorage.getItem("active_workspace_id") || ""
   );
 
-  const [tab, setTab] = useState("facebook"); // facebook | instagram
+  const [tab, setTab] = useState("facebook"); // facebook | instagram | tiktok
   const [channels, setChannels] = useState([]);
   const [selectedChannelId, setSelectedChannelId] = useState("");
 
@@ -547,11 +650,9 @@ export default function Feeds({ theme, setTheme }) {
   const [q, setQ] = useState("");
   const feedTopRef = useRef(null);
 
-  // media modal
   const [mediaOpen, setMediaOpen] = useState(false);
   const [media, setMedia] = useState(null);
 
-  // comments modal (FB only)
   const [cmOpen, setCmOpen] = useState(false);
   const [cmLoading, setCmLoading] = useState(false);
   const [cmErr, setCmErr] = useState("");
@@ -561,7 +662,6 @@ export default function Feeds({ theme, setTheme }) {
   const [cmReply, setCmReply] = useState("");
   const [cmPosting, setCmPosting] = useState(false);
 
-  /* -------- load workspaces -------- */
   useEffect(() => {
     (async () => {
       try {
@@ -579,7 +679,6 @@ export default function Feeds({ theme, setTheme }) {
     // eslint-disable-next-line
   }, []);
 
-  /* -------- load channels per workspace -------- */
   useEffect(() => {
     if (!workspaceId) {
       setChannels([]);
@@ -592,7 +691,7 @@ export default function Feeds({ theme, setTheme }) {
     (async () => {
       setErr("");
       try {
-        const j = await listPublisherChannels(workspaceId, "meta");
+        const j = await listPublisherChannels(workspaceId, "");
         setChannels(j.channels || []);
         setItems([]);
         setPaging(null);
@@ -607,7 +706,6 @@ export default function Feeds({ theme, setTheme }) {
     return (channels || []).filter((c) => c.platform === tab);
   }, [channels, tab]);
 
-  // auto-select first channel in current tab
   useEffect(() => {
     if (!filteredChannels.length) {
       setSelectedChannelId("");
@@ -625,14 +723,12 @@ export default function Feeds({ theme, setTheme }) {
     setSelectedChannelId("");
     setErr("");
     setQ("");
-    setTimeout(
-      () =>
-        feedTopRef.current?.scrollIntoView?.({
-          behavior: "smooth",
-          block: "start",
-        }),
-      0
-    );
+    setTimeout(() => {
+      feedTopRef.current?.scrollIntoView?.({
+        behavior: "smooth",
+        block: "start",
+      });
+    }, 0);
   }
 
   async function loadFeed({ more = false } = {}) {
@@ -643,20 +739,29 @@ export default function Feeds({ theme, setTheme }) {
 
     try {
       let j;
-      const after = more ? paging?.cursors?.after || "" : "";
 
       if (tab === "facebook") {
+        const after = more ? paging?.cursors?.after || "" : "";
         j = await fetchFacebookFeed({
           workspaceId,
           pageChannelId: selectedChannelId,
           after,
           limit: 10,
         });
-      } else {
+      } else if (tab === "instagram") {
+        const after = more ? paging?.cursors?.after || "" : "";
         j = await fetchInstagramFeed({
           workspaceId,
           igChannelId: selectedChannelId,
           after,
+          limit: 10,
+        });
+      } else {
+        const cursor = more ? paging?.next_cursor || 0 : 0;
+        j = await fetchTikTokFeed({
+          workspaceId,
+          channelId: selectedChannelId,
+          cursor,
           limit: 10,
         });
       }
@@ -794,7 +899,8 @@ export default function Feeds({ theme, setTheme }) {
     }
   }
 
-  const canLoadMore = !!paging?.cursors?.after;
+  const canLoadMore =
+    tab === "tiktok" ? !!paging?.has_more : !!paging?.cursors?.after;
 
   const filteredItemsByQuery = useMemo(() => {
     const query = (q || "").trim().toLowerCase();
@@ -804,7 +910,10 @@ export default function Feeds({ theme, setTheme }) {
       const text =
         tab === "facebook"
           ? `${it.message || ""} ${it.story || ""} ${it.id || ""}`
-          : `${it.caption || ""} ${it.id || ""}`;
+          : tab === "instagram"
+          ? `${it.caption || ""} ${it.id || ""}`
+          : `${it.caption || ""} ${it.title || ""} ${it.id || ""}`;
+
       return String(text).toLowerCase().includes(query);
     });
   }, [items, q, tab]);
@@ -812,22 +921,19 @@ export default function Feeds({ theme, setTheme }) {
   return (
     <AppShell theme={theme} setTheme={setTheme} active="feeds">
       <div className="flex h-[calc(100vh-0px)] min-h-0">
-        {/* Center column */}
         <div className="flex-1 min-w-0 overflow-y-auto custom-scrollbar bg-background-dark/40">
           <div ref={feedTopRef} />
 
           <div className="max-w-4xl mx-auto px-4 md:px-8 py-6 md:py-8">
-            {/* Header */}
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div>
                 <h2 className="text-3xl font-bold text-slate-100">Feeds</h2>
                 <p className="text-slate-500 text-sm mt-1">
-                  Facebook & Instagram posts by workspace and connected page/account.
+                  Facebook, Instagram and TikTok posts by workspace and connected accounts.
                 </p>
               </div>
 
               <div className="flex items-center gap-3 flex-wrap">
-                {/* Search */}
                 <div className="relative">
                   <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">
                     search
@@ -841,14 +947,11 @@ export default function Feeds({ theme, setTheme }) {
                   />
                 </div>
 
-                {/* Workspace */}
                 <select
                   value={workspaceId}
                   onChange={(e) => onSelectWorkspace(e.target.value)}
-
-  className="bg-surface-dark text-white border border-primary/20 rounded-2xl px-4 py-2 text-sm
-             focus:ring-2 focus:ring-primary focus:border-primary outline-none
-             [color-scheme:dark]"                >
+                  className="bg-surface-dark text-white border border-primary/20 rounded-2xl px-4 py-2 text-sm focus:ring-2 focus:ring-primary focus:border-primary outline-none [color-scheme:dark]"
+                >
                   <option value="">Select workspace…</option>
                   {workspaces.map((w) => (
                     <option key={w.id} value={w.id}>
@@ -857,7 +960,6 @@ export default function Feeds({ theme, setTheme }) {
                   ))}
                 </select>
 
-                {/* Tabs */}
                 <div className="flex gap-2">
                   <button
                     className={[
@@ -868,6 +970,7 @@ export default function Feeds({ theme, setTheme }) {
                     ].join(" ")}
                     onClick={() => switchTab("facebook")}
                     disabled={!workspaceId}
+                    type="button"
                   >
                     Facebook
                   </button>
@@ -881,12 +984,26 @@ export default function Feeds({ theme, setTheme }) {
                     ].join(" ")}
                     onClick={() => switchTab("instagram")}
                     disabled={!workspaceId}
+                    type="button"
                   >
                     Instagram
                   </button>
+
+                  <button
+                    className={[
+                      "px-3 py-2 rounded-xl border text-xs font-bold",
+                      tab === "tiktok"
+                        ? "border-white/20 bg-white/10 text-white"
+                        : "border-primary/10 bg-surface-dark text-white/70 hover:bg-white/5",
+                    ].join(" ")}
+                    onClick={() => switchTab("tiktok")}
+                    disabled={!workspaceId}
+                    type="button"
+                  >
+                    TikTok
+                  </button>
                 </div>
 
-                {/* Channel */}
                 <select
                   className="bg-surface-dark border border-primary/10 rounded-xl px-3 py-2 text-sm text-white/80 focus:ring-1 focus:ring-primary focus:border-primary outline-none min-w-[260px]"
                   value={selectedChannelId}
@@ -907,6 +1024,7 @@ export default function Feeds({ theme, setTheme }) {
                   className="px-3 py-2 rounded-xl border border-primary/10 bg-surface-dark text-white/80 text-xs font-bold hover:bg-white/5 disabled:opacity-50"
                   onClick={() => loadFeed({ more: false })}
                   disabled={!workspaceId || !selectedChannelId || loading}
+                  type="button"
                 >
                   Refresh
                 </button>
@@ -919,7 +1037,6 @@ export default function Feeds({ theme, setTheme }) {
               </div>
             ) : null}
 
-            {/* Feed list */}
             <div className="mt-6 flex flex-col gap-6">
               {!workspaceId ? (
                 <div className="p-8 text-center text-white/40 text-sm">
@@ -957,6 +1074,7 @@ export default function Feeds({ theme, setTheme }) {
                       className="px-4 py-2 rounded-xl border border-primary/10 bg-surface-dark text-white/80 text-xs font-bold hover:bg-white/5 disabled:opacity-50"
                       onClick={() => loadFeed({ more: true })}
                       disabled={loading || !canLoadMore}
+                      type="button"
                     >
                       Load more
                     </button>
@@ -970,7 +1088,6 @@ export default function Feeds({ theme, setTheme }) {
           </div>
         </div>
 
-        {/* Right column */}
         <TrendingPanel
           tab={tab}
           items={items}
@@ -980,7 +1097,6 @@ export default function Feeds({ theme, setTheme }) {
           }}
         />
 
-        {/* Comments Modal (Facebook only) */}
         {cmOpen ? (
           <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4">
             <div className="w-full max-w-3xl rounded-2xl border border-primary/10 bg-background-dark/95 overflow-hidden">
@@ -994,6 +1110,7 @@ export default function Feeds({ theme, setTheme }) {
                 <button
                   className="px-3 py-2 rounded-xl border border-primary/10 bg-surface-dark text-white/70 hover:bg-white/5 text-xs font-bold"
                   onClick={() => setCmOpen(false)}
+                  type="button"
                 >
                   Close
                 </button>
@@ -1039,6 +1156,7 @@ export default function Feeds({ theme, setTheme }) {
                         onClick={() => doReplyToComment(c.id)}
                         disabled={cmPosting || !cmReply.trim()}
                         className="px-3 py-2 rounded-xl bg-primary/15 border border-primary/25 text-primary text-xs font-bold disabled:opacity-50 hover:bg-primary/20"
+                        type="button"
                       >
                         Reply
                       </button>
@@ -1051,6 +1169,7 @@ export default function Feeds({ theme, setTheme }) {
                     className="px-4 py-2 rounded-xl border border-primary/10 bg-surface-dark text-white/80 text-xs font-bold hover:bg-white/5 disabled:opacity-50"
                     onClick={loadMoreComments}
                     disabled={cmLoading || !cmPaging?.cursors?.after}
+                    type="button"
                   >
                     Load more
                   </button>
@@ -1063,7 +1182,6 @@ export default function Feeds({ theme, setTheme }) {
           </div>
         ) : null}
 
-        {/* Media Preview Modal */}
         <MediaModal
           open={mediaOpen}
           media={media}
